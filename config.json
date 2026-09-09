@@ -1,0 +1,27 @@
+{
+  "server": {
+    "game_base_url": "https://server.live.prod.devsnova.cloud/",
+    "timeout_seconds": 20,
+    "verify_ssl": true
+  },
+  "devplay": {
+    "location_country": "LA",
+    "timezone": "Asia/Vientiane",
+    "model": "SM-A156E",
+    "os_version": "12"
+  },
+  "game": {
+    "version": "26.8.02",
+    "build_version": "651"
+  },
+  "workflow": {
+    "receiver_slot": "A",
+    "friend_source_type": 2,
+    "grpc_timeout_seconds": 12,
+    "ds_timeout_seconds": 20,
+    "mailbox_retries": 6,
+    "mailbox_delay_seconds": 1.0,
+    "step_delay_seconds": 0.35,
+    "batch_delay_seconds": 0.5
+  }
+}
