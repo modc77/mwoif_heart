@@ -4,7 +4,6 @@ __pycache__/
 *.log
 .env
 .env.*
-.venv
 
 # Runtime credentials/cache - NEVER commit
 .state/*
@@ -25,3 +24,5 @@ config.local.json
 Thumbs.db
 .vscode/
 .idea/
+
+logs/

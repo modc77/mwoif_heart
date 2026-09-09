@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .auth_store import AuthRecord
+from .auth_context import fixed_auth_metadata
 
 
 NATIVE_ORDER = [
@@ -47,26 +48,14 @@ def build_metadata(
     if not auth.mid:
         raise ValueError("MID/player-id is required")
 
-    # Auth V13.1 is the owner of account identity/runtime metadata.
-    values: dict[str, str] = dict(auth.metadata)
+    # Stable values are owned by Python config; account/runtime values come from Auth.
+    values: dict[str, str] = fixed_auth_metadata(cfg, mid=auth.mid)
+    values.update(auth.metadata)
 
     # Never use Session V13 session_key here.
     values["authorization"] = "Bearer " + auth.game_access_token
     values["player-id"] = auth.mid
 
-    # Config is fallback for build/device-generic values only.
-    # It must not overwrite values captured from the current game login.
-    _put_if_missing(values, "version", cfg.game.get("version"))
-    _put_if_missing(values, "version-code", cfg.game.get("build_version"))
-    _put_if_missing(values, "timezone", cfg.devplay.get("timezone"))
-    _put_if_missing(values, "os.type", "A")
-    _put_if_missing(values, "os_version", cfg.devplay.get("os_version"))
-    _put_if_missing(values, "market_type", "GOOGLE_PLAY")
-    _put_if_missing(values, "device-name", cfg.devplay.get("model"))
-    _put_if_missing(values, "device-model", cfg.devplay.get("model"))
-
-    # Do not take account-specific fgs-id/device-id/MID/email from config.
-    # Current Auth JSON owns those values. Missing values stay missing.
     _put_if_missing(values, "fgs-id", auth.fgs_id)
     _put_if_missing(values, "device-id", auth.device_id)
 

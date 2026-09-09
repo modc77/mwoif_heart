@@ -93,16 +93,19 @@ class SessionStore:
                 if candidate:
                     return candidate
 
-        marker = '{"schema":"mwoif-session-v13"'
-        start = text.find(marker)
-        if start >= 0:
-            candidate = text[start:].strip()
-            end = candidate.rfind("}")
-            if end >= 0:
-                return candidate[: end + 1]
+        for marker in (
+            '{"schema":"mwoif-session-min-v1"',
+            '{"schema":"mwoif-session-v13"',
+        ):
+            start = text.find(marker)
+            if start >= 0:
+                candidate = text[start:].strip()
+                end = candidate.rfind("}")
+                if end >= 0:
+                    return candidate[: end + 1]
 
         raise SessionImportError(
-            "V13 Session JSON not found; paste the exact JSON copied by COPY SESSION JSON"
+            "Session JSON not found; use COPY SESSION JSON from LAB"
         )
 
     def import_v13(
@@ -121,8 +124,11 @@ class SessionStore:
             raise SessionImportError(f"invalid V13 session JSON: {exc}") from exc
         if not isinstance(data, dict):
             raise SessionImportError("V13 session JSON root must be an object")
-        if str(data.get("schema") or "") != "mwoif-session-v13":
-            raise SessionImportError("expected schema=mwoif-session-v13")
+        schema = str(data.get("schema") or "")
+        if schema not in {"mwoif-session-min-v1", "mwoif-session-v13"}:
+            raise SessionImportError(
+                "expected schema=mwoif-session-min-v1 or mwoif-session-v13"
+            )
 
         member_seq = int(data.get("member_seq") or 0)
         current_lv = int(data.get("current_lv") or 0)
@@ -138,7 +144,7 @@ class SessionStore:
             member_seq=member_seq,
             current_lv=current_lv,
             session_key=session_key,
-            source=str(data.get("source") or "mwoif-session-v13"),
+            source="established_game_state",
             imported_at=datetime.now(timezone.utc).isoformat(),
         )
         self.save(record)

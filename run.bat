@@ -1,14 +1,22 @@
 @echo off
 cd /d "%~dp0"
 
-if not exist ".venv\Scripts\python.exe" (
-    echo [MWOIF] First setup...
-    powershell -NoProfile -ExecutionPolicy Bypass -File setup_windows.ps1
-    if errorlevel 1 (
-        echo Setup failed.
-        pause
-        exit /b 1
-    )
+if exist ".venv\Scripts\pythonw.exe" (
+    start "" ".venv\Scripts\pythonw.exe" "%~dp0main.py"
+    exit /b 0
 )
 
-".venv\Scripts\python.exe" main.py menu
+where pyw.exe >nul 2>nul
+if not errorlevel 1 (
+    start "" pyw.exe -3 "%~dp0main.py"
+    exit /b 0
+)
+
+where pythonw.exe >nul 2>nul
+if not errorlevel 1 (
+    start "" pythonw.exe "%~dp0main.py"
+    exit /b 0
+)
+
+echo ไม่พบ Python 3 กรุณาติดตั้ง Python 3 แล้วลองใหม่
+pause

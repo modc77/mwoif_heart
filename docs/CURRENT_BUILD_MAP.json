@@ -1,0 +1,151 @@
+{
+  "schema": "mwoif-heart-build-map-v1",
+  "game": {
+    "version": "26.8.02",
+    "build_version": "651"
+  },
+  "status": "LIVE_VALIDATED",
+  "rule": "On update, search by anchor first. Never trust old GH addresses until revalidated.",
+  "items": [
+    {
+      "group": "Friend gRPC",
+      "name": "gRPC target",
+      "search_anchor": "DevPlay game_endpoints[grpc]",
+      "current": "gserver.live.prod.devsnova.cloud:443",
+      "status": "LIVE"
+    },
+    {
+      "group": "Friend gRPC",
+      "name": "Friend stub routes",
+      "search_anchor": "/service.api.FriendAPI/ListFriends",
+      "current": "FUN_016EE43C route table",
+      "status": "LIVE"
+    },
+    {
+      "group": "Friend gRPC",
+      "name": "Add friend",
+      "search_anchor": "service.api.SendFriendRequestRequest.player_id",
+      "current": "serializer FUN_016F3160 • field#2 player_id • field#3 type",
+      "status": "LIVE"
+    },
+    {
+      "group": "Friend gRPC",
+      "name": "Accept friend",
+      "search_anchor": "service.api.HandleFriendRequestRequest.player_id",
+      "current": "serializer FUN_016F39D0 • field#2 player_id • field#3 accepted",
+      "status": "LIVE"
+    },
+    {
+      "group": "Friend gRPC",
+      "name": "Remove friend",
+      "search_anchor": "service.api.RemoveFriendRequest.player_ids",
+      "current": "field#2 player_ids repeated string",
+      "status": "LIVE"
+    },
+    {
+      "group": "Heart DS",
+      "name": "Send heart endpoint",
+      "search_anchor": "game/sendLifeMail2.ds",
+      "current": "GH 0x007B24A9 • builder FUN_013D4D10",
+      "status": "LIVE"
+    },
+    {
+      "group": "Heart DS",
+      "name": "Send heart fields",
+      "search_anchor": "fromMemberSeq / toMemberSeq / requestId",
+      "current": "fromMemberSeq,toMemberSeq,requestId=empty",
+      "status": "LIVE"
+    },
+    {
+      "group": "Heart DS",
+      "name": "Mailbox endpoint",
+      "search_anchor": "game/myMailList.ds",
+      "current": "GH 0x007BC9F2 • builder FUN_01624E58",
+      "status": "LIVE"
+    },
+    {
+      "group": "Heart DS",
+      "name": "Mailbox parsers",
+      "search_anchor": "mailList / rewardMailList / fromMemberSeq / seq",
+      "current": "dispatch FUN_013D0CA4 • mail FUN_013D3530 • item FUN_013BDB34",
+      "status": "LIVE"
+    },
+    {
+      "group": "Heart DS",
+      "name": "Receive endpoint",
+      "search_anchor": "game/acceptLifeMail4.ds",
+      "current": "GH 0x0073B69B • builder FUN_013D518C • caller FUN_01422AC0",
+      "status": "LIVE"
+    },
+    {
+      "group": "Heart DS",
+      "name": "Receive fields",
+      "search_anchor": "lifeMailBoxSeqList",
+      "current": "memberSeq + lifeMailBoxSeqList",
+      "status": "LIVE"
+    },
+    {
+      "group": "DS v4",
+      "name": "Common serializer",
+      "search_anchor": "isEncryptedData / protocolAcceptableEncryptionVersion",
+      "current": "FUN_00F1B108",
+      "status": "LIVE"
+    },
+    {
+      "group": "DS v4",
+      "name": "ChaCha20 encrypt/decrypt",
+      "search_anchor": "trace from FUN_00F1B108",
+      "current": "FUN_00F3DA48 / core FUN_016AF2D4",
+      "status": "LIVE"
+    },
+    {
+      "group": "DS v4",
+      "name": "FastLZ",
+      "search_anchor": "trace compression from common serializer",
+      "current": "compress FUN_016AAB7C • decompress FUN_016AAB8C",
+      "status": "LIVE"
+    },
+    {
+      "group": "DS v4",
+      "name": "Static key address",
+      "search_anchor": "crypto xref from FUN_00F3DB3C/FUN_00F3DA48",
+      "current": "GH 0x007D2310",
+      "status": "LIVE"
+    },
+    {
+      "group": "DS v4",
+      "name": "Base nonce address",
+      "search_anchor": "crypto xref from FUN_00F3DB3C/FUN_00F3DA48",
+      "current": "GH 0x007D2330",
+      "status": "LIVE"
+    },
+    {
+      "group": "Auth/runtime",
+      "name": "gRPC metadata builder",
+      "search_anchor": "authorization / player-id / version-code / timezone",
+      "current": "FUN_00EB97FC",
+      "status": "LIVE"
+    },
+    {
+      "group": "Auth/runtime",
+      "name": "FGS ID getter",
+      "search_anchor": "getFgsId",
+      "current": "string GH 0x007B31DF • getter FUN_0179B4EC",
+      "status": "LIVE"
+    },
+    {
+      "group": "Auth/runtime",
+      "name": "timeZoneDistance",
+      "search_anchor": "timeZoneDistance",
+      "current": "string GH 0x00726040 • common builder FUN_011343B8",
+      "status": "LIVE"
+    },
+    {
+      "group": "Auth/runtime",
+      "name": "Common DS fields",
+      "search_anchor": "sessionKey / currentLv / fgsId / loginPlatform / cable",
+      "current": "common builder FUN_011343B8",
+      "status": "LIVE"
+    }
+  ]
+}

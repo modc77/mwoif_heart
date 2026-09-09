@@ -1,42 +1,8 @@
-# MWOIF Heart — Clean Multi-Account
+# M WOIF — ส่งใจ V1
 
-สถานะนี้เป็นฐาน **ที่ผ่าน live แล้ว** สำหรับ flow:
+V1 นี้เน้น **ใช้ง่ายจาก UI ทั้งหมด** ไม่ต้องพิมพ์คำสั่งใน CMD
 
-```text
-Sender -> Add Receiver
-Receiver -> Accept Sender
-Sender -> Send Heart
-Receiver -> Read Mailbox / find seq
-Receiver -> Receive Heart
-Sender -> Remove Receiver
-```
-
-## โครงสร้างบัญชี
-
-- Receiver หลักตั้งเป็น `A`
-- Sender ใช้ slot ได้ไม่จำกัด เช่น `1`, `2`, `3`, `S001`, `S002` ...
-- ไม่ผูกระบบไว้กับ A/B อีกแล้ว
-- ทุก slot ต้องมี **Session + Auth** ของตัวเอง
-
-ตัวอย่าง 100 sender:
-
-```text
-A      = Receiver
-1..100 = Senders
-```
-
-แต่ละ sender ทำ cycle ของตัวเองกับ A:
-
-```text
-1 -> A: add -> accept -> send -> receive -> remove
-2 -> A: add -> accept -> send -> receive -> remove
-...
-```
-
-ระบบ batch ทำแบบ **sequential** ก่อนเพื่อให้ baseline เสถียร
-เรื่องเร่งความเร็ว/parallel ค่อยทำหลังจากนี้
-
-## ติดตั้ง
+## เปิดโปรแกรม
 
 ดับเบิลคลิก:
 
@@ -44,106 +10,62 @@ A      = Receiver
 run.bat
 ```
 
-ครั้งแรกจะสร้าง `.venv` และติดตั้ง dependencies ให้อัตโนมัติ
+ครั้งแรกโปรแกรมจะเตรียม `.venv` และติดตั้ง requirements ให้เอง
 
-หรือ:
+## รูปแบบการทำงาน
 
-```powershell
-powershell -ExecutionPolicy Bypass -File setup_windows.ps1
-```
+- `A` = ตัวรับหลัก 1 ไอดี
+- `1, 2, 3 ... 100++` = ไอดีส่ง
+- ไอดีส่งทุกตัวส่งให้ตัวรับหลักเท่านั้น
 
-## Import account
-
-### ทีละ account
-
-```powershell
-python main.py account-import A --session path\session_A.json --auth path\auth_A.json
-python main.py account-import 1 --session path\session_1.json --auth path\auth_1.json
-python main.py account-import 2 --session path\session_2.json --auth path\auth_2.json
-```
-
-### Import หลาย account เป็น directory
-
-วางไฟล์แบบนี้:
+แต่ละไอดีทำ:
 
 ```text
-imports/
-  A/
-    session.json
-    auth.json
-  1/
-    session.json
-    auth.json
-  2/
-    session.json
-    auth.json
+เพิ่มเพื่อน → ตัวรับรับเพื่อน → ส่งใจ → อ่านกล่องใจ → รับใจ → ลบเพื่อน
 ```
 
-แล้ว:
+## เพิ่มไอดีแบบเร็ว
 
-```powershell
-python main.py import-dir imports
-```
+กด **+ เพิ่มไอดีส่ง** แล้วทำเพียง:
 
-`imports/` และ `.state/` ถูก `.gitignore` ไว้แล้ว
+1. LAB → `COPY SESSION JSON`
+2. กลับ UI → `วางจากคลิปบอร์ด`
+3. LAB → `COPY AUTH CONTEXT JSON`
+4. กลับ UI → `วางจากคลิปบอร์ด`
+5. กด `บันทึก + ไอดีถัดไป`
 
-## ดูบัญชี
+ระบบจะเลือกเลขไอดีถัดไปให้อัตโนมัติ เช่น `1 → 2 → 3 → ...`
+ไม่ต้องสร้าง `session.json` / `auth.json` เองอีก
 
-```powershell
-python main.py accounts
-python main.py doctor
-```
+## หน้าจอ
 
-## Preview 1 cycle
+- **ส่งใจ** — เลือกตัวรับ/ไอดีส่ง และเริ่มงาน
+- **จัดการไอดี** — เพิ่ม/ลบ/เช็ก Session และ Auth
+- **บันทึก** — ดู log และทดสอบรายชื่อเพื่อน/กล่องใจ
+- **อัปเดตเกม** — เปิดคู่มือและดูค่าที่ต้องหาใหม่เมื่อเกมอัปเดต
 
-```powershell
-python main.py cycle 1 --receiver A
-```
+## Git
 
-## Run 1 sender จริง
-
-```powershell
-python main.py cycle 1 --receiver A --live
-```
-
-## Run หลาย sender
-
-```powershell
-python main.py batch 1,2,3 --receiver A --live
-python main.py batch 1-20 --receiver A --live
-python main.py batch 1,3,5-10 --receiver A --live
-```
-
-ทุก account ที่ ready ยกเว้น A:
-
-```powershell
-python main.py batch --receiver A --all --live
-```
-
-## เมนู
-
-```powershell
-python main.py menu
-```
-
-หรือดับเบิลคลิก `run.bat`
-
-## Git safety
-
-ไฟล์ต่อไปนี้ **ห้าม commit** และถูก ignore แล้ว:
-
-```text
-.state/*.json
-imports/**
-import/**
-account.md
-.env*
-secrets.local.json
-```
-
-ZIP clean นี้ไม่มี Session/Auth จริงของบัญชีติดมาด้วย
+`.state/` และ `imports/` ถูก ignore แล้ว ห้าม commit Session/Auth จริง
 
 ## ขั้นถัดไป
 
-Email/password login **ยังไม่ได้รวมใน clean baseline นี้**
-เพราะขั้นนั้นจะทำแยกหลังจาก commit ฐานที่ live ผ่านทั้งหมดแล้ว
+หลัง freeze V1 นี้แล้ว งานต่อคือ LAB → Login ด้วย Email + Password
+
+
+## V1.2 — ตรวจ Session / Auth
+
+หน้า `จัดการไอดี` เพิ่ม:
+
+- **ทดสอบทั้งหมด** — ตรวจทุกไอดีแบบ READ ONLY
+- **ทดสอบที่เลือก**
+- **แก้ไข Session / Auth** — วางเฉพาะค่าที่หมดได้ ช่องว่างเก็บค่าเดิม
+- แสดง **Auth เหลือ** จาก JWT `exp`
+- แสดงผลออนไลน์ว่า Auth / Session ยังใช้ได้หรือไม่
+
+รายละเอียด: `docs/AUTH_SESSION_LIFETIME.md`
+
+
+## V1.3 — ลดข้อมูลที่ Copy จาก LAB
+
+ดู `docs/MINIMAL_LAB_CONTEXT.md` — Session เหลือ 3 ค่า, Auth เหลือ 4 ค่า และ Python เติม metadata คงที่เองทั้งหมด

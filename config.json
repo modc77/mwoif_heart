@@ -2,17 +2,27 @@
   "server": {
     "game_base_url": "https://server.live.prod.devsnova.cloud/",
     "timeout_seconds": 20,
-    "verify_ssl": true
+    "verify_ssl": true,
+    "friend_grpc_target": "gserver.live.prod.devsnova.cloud:443"
   },
   "devplay": {
-    "location_country": "LA",
-    "timezone": "Asia/Vientiane",
-    "model": "SM-A156E",
-    "os_version": "12"
+    "runtime_metadata_version": "V13.6.1",
+    "timezone": "Asia/Bangkok",
+    "location_country": "US",
+    "os_type": "A",
+    "os_version": "12",
+    "locale": "en-US",
+    "device_name": "SM-A156E",
+    "device_model": "SM-A156E",
+    "device_id": "ffa0229d7ac5e676",
+    "time_zone_distance": "25200",
+    "market_type": "GOOGLE_PLAY",
+    "login_platform": "email"
   },
   "game": {
     "version": "26.8.02",
-    "build_version": "651"
+    "build_version": "651",
+    "index_file_hash": "71c2fe2247b746f7570e7e6ae5670c69"
   },
   "workflow": {
     "receiver_slot": "A",
@@ -22,6 +32,10 @@
     "mailbox_retries": 6,
     "mailbox_delay_seconds": 1.0,
     "step_delay_seconds": 0.35,
-    "batch_delay_seconds": 0.5
+    "batch_delay_seconds": 0.5,
+    "account_test_grpc_timeout_seconds": 6,
+    "account_test_ds_timeout_seconds": 8,
+    "auth_expiry_warning_minutes": 30,
+    "account_test_delay_seconds": 0.15
   }
 }

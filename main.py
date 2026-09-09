@@ -1,476 +1,168 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import argparse
-import json
+import importlib.util
+import os
+import queue
+import subprocess
+import sys
+import threading
 from pathlib import Path
-from typing import Any
 
-from mwoif.accounts import (
-    existing_slots,
-    import_pair,
-    pair_status,
-)
-from mwoif.auth_store import AuthStore
-from mwoif.config import load_config
-from mwoif.endpoint_registry import public_registry
-from mwoif.friend_grpc import list_friends
-from mwoif.grpc_metadata import load_metadata_file
-from mwoif.heart_mailbox import preview_mail_list
-from mwoif.session_store import SessionStore
-from mwoif.slots import normalize_slot
-from mwoif.workflow import cycle_plan, run_batch, run_cycle
+ROOT = Path(__file__).resolve().parent
+REQ = ROOT / "requirements.txt"
+VENV = ROOT / ".venv"
 
-VERSION = "7.0-clean-multi-account"
 
+def _hidden_flags() -> int:
+    if os.name == "nt":
+        return getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return 0
 
-def root_dir() -> Path:
-    return Path(__file__).resolve().parent
 
+def _deps_ready() -> bool:
+    return all(importlib.util.find_spec(name) is not None for name in ("requests", "grpc"))
 
-def dump(value: Any) -> None:
-    print(json.dumps(value, ensure_ascii=False, indent=2))
 
-
-def get_context():
-    cfg = load_config(root_dir())
-    return cfg, SessionStore(cfg.root), AuthStore(cfg.root)
-
-
-def parse_slot_selector(values: list[str]) -> list[str]:
-    out: list[str] = []
-    seen: set[str] = set()
-
-    for raw in values:
-        for token in raw.split(","):
-            token = token.strip()
-            if not token:
-                continue
-
-            match = __import__("re").fullmatch(r"(\d+)-(\d+)", token)
-            if match:
-                start, end = map(int, match.groups())
-                step = 1 if end >= start else -1
-                expanded = [str(i) for i in range(start, end + step, step)]
-            else:
-                expanded = [token]
-
-            for item in expanded:
-                slot = normalize_slot(item)
-                if slot not in seen:
-                    seen.add(slot)
-                    out.append(slot)
-    return out
-
-
-def cmd_doctor(_):
-    cfg, sessions, auths = get_context()
-    deps = {}
-    for name in ("requests", "grpc"):
-        try:
-            __import__(name)
-            deps[name] = True
-        except Exception:
-            deps[name] = False
-
-    slots = existing_slots(cfg.root)
-    dump({
-        "ok": all(deps.values()),
-        "version": VERSION,
-        "dependencies": deps,
-        "receiver_default": cfg.workflow.get("receiver_slot", "A"),
-        "accounts_ready": [
-            pair_status(slot, sessions, auths)
-            for slot in slots
-        ],
-    })
-
-
-def cmd_accounts(_):
-    cfg, sessions, auths = get_context()
-    slots = existing_slots(cfg.root)
-    dump({
-        "ok": True,
-        "count": len(slots),
-        "accounts": [
-            pair_status(slot, sessions, auths)
-            for slot in slots
-        ],
-    })
-
-
-def cmd_account_import(args):
-    cfg, sessions, auths = get_context()
-    result = import_pair(
-        slot=args.slot,
-        session_file=Path(args.session),
-        auth_file=Path(args.auth),
-        sessions=sessions,
-        auths=auths,
-    )
-    dump({"ok": True, "action": "account-import", **result})
-
-
-def cmd_import_dir(args):
-    cfg, sessions, auths = get_context()
-    base = Path(args.directory)
-    results = []
-
-    if not base.is_dir():
-        raise ValueError(f"not a directory: {base}")
-
-    for child in sorted((p for p in base.iterdir() if p.is_dir()), key=lambda p: p.name):
-        session_file = child / "session.json"
-        auth_file = child / "auth.json"
-        if not session_file.is_file() or not auth_file.is_file():
-            continue
-        try:
-            item = import_pair(
-                slot=child.name,
-                session_file=session_file,
-                auth_file=auth_file,
-                sessions=sessions,
-                auths=auths,
-            )
-            results.append({"slot": item["slot"], "ok": True})
-        except Exception as exc:
-            results.append({
-                "slot": child.name,
-                "ok": False,
-                "error": type(exc).__name__,
-                "message": str(exc),
-            })
-
-    dump({
-        "ok": all(x["ok"] for x in results) if results else False,
-        "action": "import-dir",
-        "imported": sum(1 for x in results if x["ok"]),
-        "failed": sum(1 for x in results if not x["ok"]),
-        "results": results,
-    })
-
-
-def cmd_endpoints(_):
-    dump({"ok": True, "version": VERSION, "endpoints": public_registry()})
-
-
-def cmd_friend_list(args):
-    cfg, sessions, auths = get_context()
-    slot = normalize_slot(args.slot)
-    status = pair_status(slot, sessions, auths)
-    if not status["ready"]:
-        raise ValueError(f"slot {slot} is not ready")
-
-    auth = auths.load(slot)
-    assert auth is not None
-    result = list_friends(
-        cfg=cfg,
-        slot=slot,
-        auth=auth,
-        request_body=b"",
-        extra_metadata=load_metadata_file(args.metadata_file),
-        timeout=args.timeout,
-    )
-    result["slot"] = slot
-    dump(result)
-
-
-def cmd_mailbox(args):
-    cfg, sessions, auths = get_context()
-    receiver = normalize_slot(args.receiver)
-    sender = normalize_slot(args.sender)
-
-    receiver_session = sessions.load(receiver)
-    receiver_auth = auths.load(receiver)
-    sender_session = sessions.load(sender)
-    if not receiver_session or not receiver_session.established:
-        raise ValueError(f"receiver {receiver} Session not ready")
-    if not receiver_auth or not receiver_auth.ready:
-        raise ValueError(f"receiver {receiver} Auth not ready")
-    if not sender_session or not sender_session.established:
-        raise ValueError(f"sender {sender} Session not ready")
-
-    result = preview_mail_list(
-        cfg=cfg,
-        slot=receiver,
-        session=receiver_session,
-        auth=receiver_auth,
-        from_slot=sender,
-        from_member_seq=int(sender_session.member_seq),
-        live=args.live,
-        timeout=args.timeout,
-    )
-    dump(result)
-
-
-def _workflow_options(cfg, args):
-    wf = cfg.workflow
-    return {
-        "source_type": args.source_type or int(wf.get("friend_source_type", 2)),
-        "grpc_timeout": float(wf.get("grpc_timeout_seconds", 12)),
-        "ds_timeout": float(wf.get("ds_timeout_seconds", 20)),
-        "mailbox_retries": int(wf.get("mailbox_retries", 6)),
-        "mailbox_delay": float(wf.get("mailbox_delay_seconds", 1.0)),
-        "step_delay": float(wf.get("step_delay_seconds", 0.35)),
-    }
-
-
-def cmd_cycle(args):
-    cfg, sessions, auths = get_context()
-    receiver = normalize_slot(
-        args.receiver or cfg.workflow.get("receiver_slot", "A")
-    )
-    sender = normalize_slot(args.sender)
-
-    result = run_cycle(
-        cfg=cfg,
-        sessions=sessions,
-        auths=auths,
-        sender=sender,
-        receiver=receiver,
-        live=args.live,
-        **_workflow_options(cfg, args),
-    )
-    dump(result)
-
-
-def cmd_batch(args):
-    cfg, sessions, auths = get_context()
-    receiver = normalize_slot(
-        args.receiver or cfg.workflow.get("receiver_slot", "A")
-    )
-
-    if args.all:
-        senders = [
-            slot
-            for slot in existing_slots(cfg.root)
-            if slot != receiver
-            and pair_status(slot, sessions, auths)["ready"]
-        ]
-    else:
-        senders = parse_slot_selector(args.senders)
-        if not senders:
-            raise ValueError("provide sender slots/ranges or use --all")
-
-    result = run_batch(
-        cfg=cfg,
-        sessions=sessions,
-        auths=auths,
-        senders=senders,
-        receiver=receiver,
-        live=args.live,
-        stop_on_error=args.stop_on_error,
-        batch_delay=float(cfg.workflow.get("batch_delay_seconds", 0.5)),
-        **_workflow_options(cfg, args),
-    )
-    dump(result)
-
-
-def _menu_accounts(cfg, sessions, auths):
-    slots = existing_slots(cfg.root)
-    print("\nAccounts")
-    print("-" * 62)
-    print(f"{'SLOT':<12}{'READY':<8}{'MID':<18}{'MEMBER_SEQ'}")
-    for slot in slots:
-        st = pair_status(slot, sessions, auths)
-        print(
-            f"{slot:<12}{str(st['ready']):<8}"
-            f"{st['mid']:<18}{st['member_seq']}"
-        )
-    if not slots:
-        print("(none)")
-
-
-def cmd_menu(_):
-    cfg, sessions, auths = get_context()
-    default_receiver = normalize_slot(
-        cfg.workflow.get("receiver_slot", "A")
-    )
-
-    while True:
-        print("\n=== MWOIF HEART ===")
-        print(f"Receiver default: {default_receiver}")
-        print("1) Accounts")
-        print("2) Import account")
-        print("3) Run one sender -> receiver")
-        print("4) Run selected senders -> receiver")
-        print("5) Run ALL ready senders -> receiver")
-        print("0) Exit")
-        choice = input("> ").strip()
-
-        if choice == "0":
-            return
-        if choice == "1":
-            _menu_accounts(cfg, sessions, auths)
-            continue
-        if choice == "2":
-            slot = input("Slot (A / 1 / 2 / S001 ...): ").strip()
-            session_file = input("Session JSON file: ").strip().strip('"')
-            auth_file = input("Auth JSON file: ").strip().strip('"')
-            try:
-                result = import_pair(
-                    slot=slot,
-                    session_file=Path(session_file),
-                    auth_file=Path(auth_file),
-                    sessions=sessions,
-                    auths=auths,
-                )
-                print(f"PASS: {result['slot']}")
-            except Exception as exc:
-                print(f"FAIL: {type(exc).__name__}: {exc}")
-            continue
-
-        if choice in {"3", "4", "5"}:
-            receiver = input(
-                f"Receiver [{default_receiver}]: "
-            ).strip() or default_receiver
-
-            if choice == "3":
-                senders = [input("Sender slot: ").strip()]
-            elif choice == "4":
-                raw = input("Senders (e.g. 1,2,5-10): ").strip()
-                senders = parse_slot_selector([raw])
-            else:
-                receiver_norm = normalize_slot(receiver)
-                senders = [
-                    slot
-                    for slot in existing_slots(cfg.root)
-                    if slot != receiver_norm
-                    and pair_status(slot, sessions, auths)["ready"]
-                ]
-
-            print(
-                f"Will run {len(senders)} sender(s) -> "
-                f"{normalize_slot(receiver)}"
-            )
-            confirm = input("Type LIVE to execute: ").strip().upper()
-            if confirm != "LIVE":
-                print("Cancelled")
-                continue
-
-            result = run_batch(
-                cfg=cfg,
-                sessions=sessions,
-                auths=auths,
-                senders=senders,
-                receiver=receiver,
-                live=True,
-                stop_on_error=False,
-                batch_delay=float(
-                    cfg.workflow.get("batch_delay_seconds", 0.5)
-                ),
-                source_type=int(
-                    cfg.workflow.get("friend_source_type", 2)
-                ),
-                grpc_timeout=float(
-                    cfg.workflow.get("grpc_timeout_seconds", 12)
-                ),
-                ds_timeout=float(
-                    cfg.workflow.get("ds_timeout_seconds", 20)
-                ),
-                mailbox_retries=int(
-                    cfg.workflow.get("mailbox_retries", 6)
-                ),
-                mailbox_delay=float(
-                    cfg.workflow.get("mailbox_delay_seconds", 1.0)
-                ),
-                step_delay=float(
-                    cfg.workflow.get("step_delay_seconds", 0.35)
-                ),
-            )
-            print(
-                f"Done: PASS={result['completed']} "
-                f"FAIL={result['failed']}"
-            )
-            for item in result["results"]:
-                suffix = (
-                    ""
-                    if item["ok"]
-                    else f" ({item.get('failed_step')})"
-                )
-                print(
-                    f"  {item['sender']}: "
-                    f"{'PASS' if item['ok'] else 'FAIL'}{suffix}"
-                )
-            continue
-
-        print("Unknown choice")
-
-
-def build_parser():
-    p = argparse.ArgumentParser(
-        prog="main.py",
-        description="MWOIF Heart clean multi-account runner",
-    )
-    sp = p.add_subparsers(dest="cmd", required=True)
-
-    q = sp.add_parser("menu")
-    q.set_defaults(func=cmd_menu)
-
-    q = sp.add_parser("doctor")
-    q.set_defaults(func=cmd_doctor)
-
-    q = sp.add_parser("accounts")
-    q.set_defaults(func=cmd_accounts)
-
-    q = sp.add_parser("account-import")
-    q.add_argument("slot")
-    q.add_argument("--session", required=True)
-    q.add_argument("--auth", required=True)
-    q.set_defaults(func=cmd_account_import)
-
-    q = sp.add_parser("import-dir")
-    q.add_argument("directory", nargs="?", default="imports")
-    q.set_defaults(func=cmd_import_dir)
-
-    q = sp.add_parser("endpoints")
-    q.set_defaults(func=cmd_endpoints)
-
-    q = sp.add_parser("friend-list")
-    q.add_argument("slot")
-    q.add_argument("--timeout", type=float, default=12.0)
-    q.add_argument("--metadata-file", default="")
-    q.set_defaults(func=cmd_friend_list)
-
-    q = sp.add_parser("mailbox")
-    q.add_argument("receiver")
-    q.add_argument("sender")
-    q.add_argument("--timeout", type=float, default=20.0)
-    q.add_argument("--live", action="store_true")
-    q.set_defaults(func=cmd_mailbox)
-
-    q = sp.add_parser("cycle")
-    q.add_argument("sender")
-    q.add_argument("--receiver", default="")
-    q.add_argument("--source-type", type=int, choices=(1, 2, 3, 4))
-    q.add_argument("--live", action="store_true")
-    q.set_defaults(func=cmd_cycle)
-
-    q = sp.add_parser("batch")
-    q.add_argument("senders", nargs="*")
-    q.add_argument("--receiver", default="")
-    q.add_argument("--all", action="store_true")
-    q.add_argument("--source-type", type=int, choices=(1, 2, 3, 4))
-    q.add_argument("--stop-on-error", action="store_true")
-    q.add_argument("--live", action="store_true")
-    q.set_defaults(func=cmd_batch)
-
-    return p
-
-
-def main():
-    parser = build_parser()
-    args = parser.parse_args()
+def _in_project_venv() -> bool:
     try:
-        args.func(args)
-    except Exception as exc:
-        dump({
-            "ok": False,
-            "error": type(exc).__name__,
-            "message": str(exc),
-        })
-        raise SystemExit(2)
+        return VENV.resolve() in Path(sys.executable).resolve().parents
+    except Exception:
+        return False
 
+
+def _venv_python() -> Path:
+    if os.name == "nt":
+        return VENV / "Scripts" / "python.exe"
+    return VENV / "bin" / "python"
+
+
+def _venv_pythonw() -> Path:
+    if os.name == "nt":
+        return VENV / "Scripts" / "pythonw.exe"
+    return _venv_python()
+
+
+def _launch_venv() -> None:
+    exe = _venv_pythonw()
+    if not exe.exists():
+        raise RuntimeError("ไม่พบ Python virtual environment ของโปรเจกต์")
+    subprocess.Popen(
+        [str(exe), str(ROOT / "main.py")],
+        cwd=ROOT,
+        creationflags=_hidden_flags(),
+    )
+
+
+def _setup_gui(create_venv: bool) -> bool:
+    import tkinter as tk
+    from tkinter import messagebox, ttk
+
+    root = tk.Tk()
+    root.title("M WOIF • ติดตั้งครั้งแรก")
+    root.geometry("520x230")
+    root.resizable(False, False)
+    root.configure(bg="#0b1020")
+
+    style = ttk.Style(root)
+    try:
+        style.theme_use("clam")
+    except tk.TclError:
+        pass
+    style.configure("TFrame", background="#0b1020")
+    style.configure("TLabel", background="#0b1020", foreground="#e7edf7", font=("Segoe UI", 10))
+    style.configure("Title.TLabel", background="#0b1020", foreground="#ffffff", font=("Segoe UI Semibold", 17))
+    style.configure("Horizontal.TProgressbar", troughcolor="#172033", background="#6ea8fe")
+
+    frame = ttk.Frame(root, padding=24)
+    frame.pack(fill="both", expand=True)
+    ttk.Label(frame, text="M WOIF • Heart Worker V1", style="Title.TLabel").pack(anchor="w")
+    ttk.Label(frame, text="กำลังเตรียม Python environment สำหรับเปิด UI ครั้งแรก").pack(anchor="w", pady=(7, 16))
+    status = tk.StringVar(value="เตรียมระบบ...")
+    ttk.Label(frame, textvariable=status).pack(anchor="w")
+    bar = ttk.Progressbar(frame, mode="indeterminate")
+    bar.pack(fill="x", pady=(12, 8))
+    bar.start(10)
+    ttk.Label(frame, text="ครั้งถัดไปดับเบิลคลิก run.bat แล้ว UI จะเปิดทันที", foreground="#8fa1b8").pack(anchor="w")
+
+    q: queue.Queue[tuple[str, str]] = queue.Queue()
+    result = {"ok": False}
+
+    def worker():
+        try:
+            if create_venv:
+                q.put(("status", "กำลังสร้าง .venv ..."))
+                subprocess.run(
+                    [sys.executable, "-m", "venv", str(VENV)],
+                    cwd=ROOT,
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=_hidden_flags(),
+                )
+                pip_python = _venv_python()
+            else:
+                pip_python = Path(sys.executable)
+
+            q.put(("status", "กำลังติดตั้ง requirements ..."))
+            subprocess.run(
+                [str(pip_python), "-m", "pip", "install", "-r", str(REQ)],
+                cwd=ROOT,
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=_hidden_flags(),
+            )
+            q.put(("done", "PASS"))
+        except Exception as exc:
+            q.put(("fail", f"{type(exc).__name__}: {exc}"))
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    def poll():
+        try:
+            while True:
+                kind, text = q.get_nowait()
+                if kind == "status":
+                    status.set(text)
+                elif kind == "done":
+                    result["ok"] = True
+                    root.destroy()
+                    return
+                elif kind == "fail":
+                    bar.stop()
+                    messagebox.showerror("ติดตั้งไม่สำเร็จ", text, parent=root)
+                    root.destroy()
+                    return
+        except queue.Empty:
+            pass
+        root.after(100, poll)
+
+    root.after(100, poll)
+    root.mainloop()
+    return bool(result["ok"])
+
+
+def _bootstrap() -> None:
+    # On Windows always prefer the project's .venv and pythonw so no console
+    # is needed after the BAT launcher closes.
+    if os.name == "nt" and not _in_project_venv():
+        if _venv_pythonw().exists():
+            _launch_venv()
+            raise SystemExit(0)
+        if not _setup_gui(create_venv=True):
+            raise SystemExit(1)
+        _launch_venv()
+        raise SystemExit(0)
+
+    if not _deps_ready():
+        if not _setup_gui(create_venv=False):
+            raise SystemExit(1)
+
+
+_bootstrap()
+
+from ui import main as ui_main  # noqa: E402
 
 if __name__ == "__main__":
-    main()
+    ui_main()

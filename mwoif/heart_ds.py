@@ -213,7 +213,7 @@ def build_common_ds_payload(
     country = _meta(
         actor_auth,
         "country",
-        default=str(cfg.devplay.get("location_country") or ""),
+        default=str(cfg.devplay.get("location_country") or "US"),
     )
     version = _meta(
         actor_auth,
@@ -248,17 +248,18 @@ def build_common_ds_payload(
         actor_auth,
         "device-name",
         "device_name",
-        default=str(cfg.devplay.get("model") or ""),
+        default=str(cfg.devplay.get("device_name") or cfg.devplay.get("model") or ""),
     )
     device_model = _meta(
         actor_auth,
         "device-model",
         "device_model",
-        default=device_name,
+        default=str(cfg.devplay.get("device_model") or device_name),
     )
     device_id = (
         _meta(actor_auth, "device-id", "device_id")
         or actor_auth.device_id
+        or str(cfg.devplay.get("device_id") or "")
     )
     resolved_fgs_id = (
         str(fgs_id).strip()

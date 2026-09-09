@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, Callable
 
 from .accounts import require_pair
 from .friend_grpc import (
@@ -13,6 +13,19 @@ from .heart_ds import preview_heart_send
 from .heart_mailbox import preview_mail_list
 from .heart_receive import preview_heart_receive
 from .slots import normalize_slot
+
+
+EventCallback = Callable[[dict[str, Any]], None]
+
+
+def _emit(event_cb: EventCallback | None, event: str, **payload: Any) -> None:
+    if event_cb is None:
+        return
+    try:
+        event_cb({"event": event, **payload})
+    except Exception:
+        # UI/log callbacks must never break the validated network workflow.
+        pass
 
 
 class CycleError(RuntimeError):
@@ -76,6 +89,7 @@ def run_cycle(
     mailbox_retries: int = 6,
     mailbox_delay: float = 1.0,
     step_delay: float = 0.35,
+    event_cb: EventCallback | None = None,
 ) -> dict[str, Any]:
     sender, sender_session, sender_auth = require_pair(
         sender, sessions, auths
@@ -86,8 +100,10 @@ def run_cycle(
     if sender == receiver:
         raise ValueError("sender and receiver must be different slots")
 
+    _emit(event_cb, "cycle_start", sender=sender, receiver=receiver)
     plan = cycle_plan(sender, receiver)
     if not live:
+        _emit(event_cb, "cycle_preview", sender=sender, receiver=receiver, plan=plan)
         return {
             "ok": True,
             "live": False,
@@ -101,6 +117,7 @@ def run_cycle(
     life_mail_seq: int | None = None
 
     try:
+        _emit(event_cb, "step_start", step="friend-add", sender=sender, receiver=receiver)
         add = send_friend_request(
             cfg=cfg,
             slot=sender,
@@ -111,8 +128,10 @@ def run_cycle(
             live=True,
         )
         _must("friend-add", add, steps)
+        _emit(event_cb, "step_done", step="friend-add", sender=sender, receiver=receiver, ok=True, result=_brief("friend-add", add))
         time.sleep(step_delay)
 
+        _emit(event_cb, "step_start", step="friend-accept", sender=sender, receiver=receiver)
         accept = handle_friend_request(
             cfg=cfg,
             slot=receiver,
@@ -123,8 +142,10 @@ def run_cycle(
             live=True,
         )
         _must("friend-accept", accept, steps)
+        _emit(event_cb, "step_done", step="friend-accept", sender=sender, receiver=receiver, ok=True, result=_brief("friend-accept", accept))
         time.sleep(step_delay)
 
+        _emit(event_cb, "step_start", step="heart-send", sender=sender, receiver=receiver)
         send = preview_heart_send(
             cfg=cfg,
             actor_slot=sender,
@@ -136,10 +157,13 @@ def run_cycle(
             timeout=ds_timeout,
         )
         _must("heart-send", send, steps)
+        _emit(event_cb, "step_done", step="heart-send", sender=sender, receiver=receiver, ok=True, result=_brief("heart-send", send))
         time.sleep(step_delay)
 
         mailbox_result = None
+        _emit(event_cb, "step_start", step="heart-mail-list", sender=sender, receiver=receiver)
         for attempt in range(1, max(1, mailbox_retries) + 1):
+            _emit(event_cb, "mailbox_attempt", sender=sender, receiver=receiver, attempt=attempt, max_attempts=max(1, mailbox_retries))
             mailbox_result = preview_mail_list(
                 cfg=cfg,
                 slot=receiver,
@@ -162,6 +186,7 @@ def run_cycle(
                     "attempt": attempt,
                     "life_mail_seq": life_mail_seq,
                 })
+                _emit(event_cb, "step_done", step="heart-mail-list", sender=sender, receiver=receiver, ok=True, life_mail_seq=life_mail_seq, attempt=attempt)
                 break
 
             if attempt < mailbox_retries:
@@ -179,6 +204,7 @@ def run_cycle(
             })
             raise CycleError("heart-mail-list", result)
 
+        _emit(event_cb, "step_start", step="heart-receive", sender=sender, receiver=receiver, life_mail_seq=life_mail_seq)
         receive = preview_heart_receive(
             cfg=cfg,
             actor_slot=receiver,
@@ -189,8 +215,10 @@ def run_cycle(
             timeout=ds_timeout,
         )
         _must("heart-receive", receive, steps)
+        _emit(event_cb, "step_done", step="heart-receive", sender=sender, receiver=receiver, ok=True, result=_brief("heart-receive", receive))
         time.sleep(step_delay)
 
+        _emit(event_cb, "step_start", step="friend-remove", sender=sender, receiver=receiver)
         remove = remove_friend(
             cfg=cfg,
             slot=sender,
@@ -200,6 +228,8 @@ def run_cycle(
             live=True,
         )
         _must("friend-remove", remove, steps)
+        _emit(event_cb, "step_done", step="friend-remove", sender=sender, receiver=receiver, ok=True, result=_brief("friend-remove", remove))
+        _emit(event_cb, "cycle_done", sender=sender, receiver=receiver, ok=True, life_mail_seq=life_mail_seq)
 
         return {
             "ok": True,
@@ -211,6 +241,15 @@ def run_cycle(
         }
 
     except CycleError as exc:
+        _emit(
+            event_cb,
+            "cycle_failed",
+            sender=sender,
+            receiver=receiver,
+            ok=False,
+            failed_step=exc.step,
+            failure=_brief(exc.step, exc.result),
+        )
         return {
             "ok": False,
             "live": True,
@@ -233,6 +272,7 @@ def run_batch(
     live: bool,
     stop_on_error: bool = False,
     batch_delay: float = 0.5,
+    event_cb: EventCallback | None = None,
     **cycle_kwargs,
 ) -> dict[str, Any]:
     receiver = normalize_slot(receiver)
@@ -246,8 +286,10 @@ def run_batch(
         seen.add(slot)
         normalized.append(slot)
 
+    _emit(event_cb, "batch_start", receiver=receiver, senders=list(normalized), total=len(normalized), live=live)
     results: list[dict[str, Any]] = []
     for index, sender in enumerate(normalized, 1):
+        _emit(event_cb, "sender_start", sender=sender, receiver=receiver, index=index, total=len(normalized))
         result = run_cycle(
             cfg=cfg,
             sessions=sessions,
@@ -255,6 +297,7 @@ def run_batch(
             sender=sender,
             receiver=receiver,
             live=live,
+            event_cb=event_cb,
             **cycle_kwargs,
         )
         results.append({
@@ -264,12 +307,13 @@ def run_batch(
             "life_mail_seq": result.get("life_mail_seq"),
             "steps": result.get("steps", []),
         })
+        _emit(event_cb, "sender_done", sender=sender, receiver=receiver, index=index, total=len(normalized), ok=bool(result.get("ok")), failed_step=result.get("failed_step"))
         if not result.get("ok") and stop_on_error:
             break
         if live and index < len(normalized):
             time.sleep(max(0.0, batch_delay))
 
-    return {
+    output = {
         "ok": all(item["ok"] for item in results) if results else True,
         "live": live,
         "receiver": receiver,
@@ -278,3 +322,5 @@ def run_batch(
         "failed": sum(1 for item in results if not item["ok"]),
         "results": results,
     }
+    _emit(event_cb, "batch_done", **{k: output[k] for k in ("ok", "receiver", "completed", "failed")})
+    return output

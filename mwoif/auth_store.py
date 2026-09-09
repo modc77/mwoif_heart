@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from .slots import normalize_slot
+from .config import load_config
+from .auth_context import merge_auth_metadata
 
 
 class AuthImportError(ValueError):
@@ -105,16 +107,19 @@ class AuthStore:
                     if value:
                         return value
 
-        marker = '{"schema":"mwoif-auth-v13.1"'
-        start = text.find(marker)
-        if start >= 0:
-            candidate = text[start:].strip()
-            end = candidate.rfind("}")
-            if end >= 0:
-                return candidate[: end + 1]
+        for marker in (
+            '{"schema":"mwoif-auth-min-v1"',
+            '{"schema":"mwoif-auth-v13.1"',
+        ):
+            start = text.find(marker)
+            if start >= 0:
+                candidate = text[start:].strip()
+                end = candidate.rfind("}")
+                if end >= 0:
+                    return candidate[: end + 1]
 
         raise AuthImportError(
-            "V13.1 Auth JSON not found; use COPY AUTH CONTEXT JSON"
+            "Auth JSON not found; use COPY AUTH CONTEXT JSON from LAB"
         )
 
     def import_v13_1(
@@ -124,20 +129,26 @@ class AuthStore:
         raw: str,
         account: dict[str, Any] | None = None,
     ) -> AuthRecord:
-        # `account` is accepted only for backward CLI/test compatibility.
-        # email/mid_expected from config are intentionally ignored.
+        """Import either the new minimal LAB format or old full V13.1 format.
+
+        New minimal format only needs:
+          mid, game_access_token, fgs_id, game_process_elapsed_ms
+        Everything stable is rebuilt from config.json.
+        """
         text = self._extract_json(raw)
         try:
             data = json.loads(text)
         except json.JSONDecodeError as exc:
-            raise AuthImportError(f"invalid V13.1 auth JSON: {exc}") from exc
+            raise AuthImportError(f"invalid auth JSON: {exc}") from exc
         if not isinstance(data, dict):
             raise AuthImportError("auth JSON root must be an object")
 
         schema = str(data.get("schema") or "")
-        if schema and schema != "mwoif-auth-v13.1":
+        allowed = {"", "mwoif-auth-min-v1", "mwoif-auth-v13.1"}
+        if schema not in allowed:
             raise AuthImportError(
-                f"expected schema=mwoif-auth-v13.1, got {schema!r}"
+                "expected schema=mwoif-auth-min-v1 or mwoif-auth-v13.1, "
+                f"got {schema!r}"
             )
 
         mid = str(data.get("mid") or data.get("player_id") or "").strip()
@@ -146,36 +157,41 @@ class AuthStore:
             or data.get("gameAccessToken")
             or ""
         ).strip()
+        fgs_id = str(
+            data.get("fgs_id")
+            or data.get("fgs-id")
+            or ""
+        ).strip()
+        game_process_elapsed_ms = data.get(
+            "game_process_elapsed_ms",
+            data.get("game-process-elapsed-ms", ""),
+        )
 
         if not mid:
-            raise AuthImportError("mid/player-id is empty")
+            raise AuthImportError("mid is empty")
         if not token or token in {
-            "***", "****", "<REDACTED>", "<REAL_TOKEN_FROM_COPY_AUTH_CONTEXT_JSON>"
+            "***", "****", "<REDACTED>",
+            "<REAL_TOKEN_FROM_COPY_AUTH_CONTEXT_JSON>",
         }:
             raise AuthImportError("real game_access_token is missing")
 
-        metadata: dict[str, str] = {}
+        captured: dict[str, str] = {}
         raw_meta = data.get("metadata")
         if isinstance(raw_meta, dict):
-            metadata.update({
+            captured.update({
                 str(k): str(v)
                 for k, v in raw_meta.items()
                 if v not in (None, "")
             })
 
-        # Internal consistency check only: MID is owned by Auth itself.
-        metadata_mid = str(metadata.get("player-id") or "").strip()
-        if metadata_mid and metadata_mid != mid:
-            raise AuthImportError(
-                f"auth MID mismatch: top-level mid={mid}, metadata player-id={metadata_mid}"
-            )
-
+        # Old full V13.1 aliases remain accepted during migration.
         aliases = {
             "fgs_id": "fgs-id",
             "device_id": "device-id",
             "device_name": "device-name",
             "device_model": "device-model",
             "index_file_hash": "index-file-hash",
+            "game_process_elapsed_ms": "game-process-elapsed-ms",
             "combo_name": "combo-name",
             "login_platform": "login_platform",
             "market_type": "market_type",
@@ -186,19 +202,56 @@ class AuthStore:
         }
         for src_key, dst_key in aliases.items():
             value = data.get(src_key)
-            if value not in (None, "") and dst_key not in metadata:
-                metadata[dst_key] = str(value)
+            if value not in (None, "") and dst_key not in captured:
+                captured[dst_key] = str(value)
+
+        metadata_mid = str(captured.get("player-id") or "").strip()
+        if metadata_mid and metadata_mid != mid:
+            raise AuthImportError(
+                f"auth MID mismatch: top-level mid={mid}, "
+                f"metadata player-id={metadata_mid}"
+            )
+
+        # New minimal input must carry the two changing runtime values.
+        # Old full V13.1 can carry them inside metadata.
+        fgs_id = fgs_id or str(captured.get("fgs-id") or "")
+        if game_process_elapsed_ms in (None, ""):
+            game_process_elapsed_ms = captured.get(
+                "game-process-elapsed-ms", ""
+            )
+
+        if schema == "mwoif-auth-min-v1":
+            if not fgs_id:
+                raise AuthImportError("fgs_id is required in minimal Auth JSON")
+            if game_process_elapsed_ms in (None, ""):
+                raise AuthImportError(
+                    "game_process_elapsed_ms is required in minimal Auth JSON"
+                )
+
+        try:
+            cfg = load_config(self.root)
+        except Exception:
+            # Unit-test/backward compatibility fallback: use package project config.
+            cfg = load_config(Path(__file__).resolve().parents[1])
+        metadata = merge_auth_metadata(
+            cfg,
+            mid=mid,
+            captured=captured,
+            fgs_id=fgs_id,
+            game_process_elapsed_ms=game_process_elapsed_ms,
+        )
 
         record = AuthRecord(
             schema="mwoif-auth-cache-v1",
             slot=normalize_slot(slot),
             mid=mid,
             game_access_token=token,
-            fgs_id=str(data.get("fgs_id") or metadata.get("fgs-id") or ""),
-            device_id=str(data.get("device_id") or metadata.get("device-id") or ""),
-            source=str(data.get("source") or "game_owned_materializer"),
+            fgs_id=str(metadata.get("fgs-id") or ""),
+            device_id=str(metadata.get("device-id") or ""),
+            source="game_owned_materializer",
             metadata=metadata,
             imported_at=datetime.now(timezone.utc).isoformat(),
         )
         self.save(record)
         return record
+
