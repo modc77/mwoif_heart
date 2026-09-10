@@ -106,6 +106,66 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--hj-id", type=int, required=True)
     p.add_argument("--hs-id", type=int, required=True)
 
+    p = sub.add_parser("http-login-probe-receiver", help="Phase 4.5: try DevPlay login with direct HTTP only, then initMember3")
+    p.add_argument("--hj-id", type=int, required=True)
+
+    p = sub.add_parser("http-login-probe-sender", help="Phase 4.5: try one sender login with direct HTTP only, then initMember3")
+    p.add_argument("--hs-id", type=int, required=True)
+
+    p = sub.add_parser("http-login-probe-pair", help="Phase 4.5: try receiver+sender direct HTTP login, then initMember3 for both")
+    p.add_argument("--hj-id", type=int, required=True)
+    p.add_argument("--hs-id", type=int, required=True)
+
+    p = sub.add_parser("http-login-record-receiver", help="Phase 4.5.1: record safe browser network metadata for receiver login")
+    p.add_argument("--hj-id", type=int, required=True)
+
+    p = sub.add_parser("http-login-record-sender", help="Phase 4.5.1: record safe browser network metadata for one sender login")
+    p.add_argument("--hs-id", type=int, required=True)
+
+    p = sub.add_parser("http-login-replay-receiver", help="Phase 4.5.2: direct HTTP replay v2 login for receiver, then initMember3")
+    p.add_argument("--hj-id", type=int, required=True)
+
+    p = sub.add_parser("http-login-replay-sender", help="Phase 4.5.2: direct HTTP replay v2 login for one sender, then initMember3")
+    p.add_argument("--hs-id", type=int, required=True)
+
+    p = sub.add_parser("http-login-replay-pair", help="Phase 4.5.2: direct HTTP replay v2 receiver+sender login, then initMember3")
+    p.add_argument("--hj-id", type=int, required=True)
+    p.add_argument("--hs-id", type=int, required=True)
+
+    p = sub.add_parser("http-login-matrix-receiver", help="Phase 4.5.5: safe direct HTTP replay matrix for receiver, then initMember3 on hit")
+    p.add_argument("--hj-id", type=int, required=True)
+
+    p = sub.add_parser("http-login-matrix-sender", help="Phase 4.5.5: safe direct HTTP replay matrix for one sender, then initMember3 on hit")
+    p.add_argument("--hs-id", type=int, required=True)
+
+    p = sub.add_parser("http-login-matrix-pair", help="Phase 4.5.5: safe direct HTTP replay matrix for receiver+sender, then initMember3 on hit")
+    p.add_argument("--hj-id", type=int, required=True)
+    p.add_argument("--hs-id", type=int, required=True)
+
+    p = sub.add_parser("http-login-template-capture-receiver", help="Phase 4.5.6: capture private exact browser login request template for receiver")
+    p.add_argument("--hj-id", type=int, required=True)
+
+    p = sub.add_parser("http-login-template-capture-sender", help="Phase 4.5.6: capture private exact browser login request template for one sender")
+    p.add_argument("--hs-id", type=int, required=True)
+
+    p = sub.add_parser("http-login-template-replay-receiver", help="Phase 4.5.6: direct HTTP replay from private exact template for receiver")
+    p.add_argument("--hj-id", type=int, required=True)
+
+    p = sub.add_parser("http-login-template-replay-sender", help="Phase 4.5.6: direct HTTP replay from private exact template for one sender")
+    p.add_argument("--hs-id", type=int, required=True)
+
+    p = sub.add_parser("http-login-template-replay-pair", help="Phase 4.5.6: direct HTTP exact-template replay receiver+sender, then initMember3")
+    p.add_argument("--hj-id", type=int, required=True)
+    p.add_argument("--hs-id", type=int, required=True)
+
+    p = sub.add_parser("http-login-template-reuse-sender", help="Phase 4.5.7: reuse one captured sender template against another sender")
+    p.add_argument("--template-hs-id", type=int, required=True, help="Sender id whose private exact template file already exists")
+    p.add_argument("--target-hs-id", type=int, required=True, help="Different sender id to login with the reused template")
+
+    p = sub.add_parser("http-login-template-reuse-receiver", help="Phase 4.5.7: reuse one captured receiver template against another receiver job")
+    p.add_argument("--template-hr-id", type=int, required=True, help="Receiver id whose private exact template file already exists")
+    p.add_argument("--target-hj-id", type=int, required=True, help="Job id holding the target receiver credential")
+
     def _pair_action(name: str, help_text: str):
         q = sub.add_parser(name, help=help_text)
         q.add_argument("--hj-id", type=int, required=True)
@@ -379,6 +439,139 @@ def main(argv: list[str] | None = None) -> int:
                 }
             )
             return 0
+
+        if command in {
+            "http-login-probe-receiver",
+            "http-login-probe-sender",
+            "http-login-probe-pair",
+            "http-login-record-receiver",
+            "http-login-record-sender",
+            "http-login-replay-receiver",
+            "http-login-replay-sender",
+            "http-login-replay-pair",
+            "http-login-matrix-receiver",
+            "http-login-matrix-sender",
+            "http-login-matrix-pair",
+            "http-login-template-capture-receiver",
+            "http-login-template-capture-sender",
+            "http-login-template-replay-receiver",
+            "http-login-template-replay-sender",
+            "http-login-template-replay-pair",
+            "http-login-template-reuse-sender",
+            "http-login-template-reuse-receiver",
+        }:
+            from mwoif.application.login_session_manager import LoginSessionManager
+
+            vault = CredentialVault(config.vault)
+            manager = LoginSessionManager(config, repo, vault)
+
+            def event(text: str) -> None:
+                print(text)
+
+            if command == "http-login-record-receiver":
+                result = manager.http_record_receiver_for_job(hj_id=args.hj_id, event_cb=event)
+                _print_json({"ok": bool(result.get("ok")), "receiver": result, "secretOutput": "NONE"})
+                return 0 if result.get("ok") else 1
+
+            if command == "http-login-record-sender":
+                result = manager.http_record_sender(hs_id=args.hs_id, event_cb=event)
+                _print_json({"ok": bool(result.get("ok")), "sender": result, "secretOutput": "NONE"})
+                return 0 if result.get("ok") else 1
+
+            if command == "http-login-replay-receiver":
+                result = manager.http_replay_receiver_for_job(hj_id=args.hj_id, event_cb=event)
+                _print_json({"ok": bool(result.get("ok")), "receiver": result, "secretOutput": "NONE"})
+                return 0 if result.get("ok") else 1
+
+            if command == "http-login-replay-sender":
+                result = manager.http_replay_sender(hs_id=args.hs_id, event_cb=event)
+                _print_json({"ok": bool(result.get("ok")), "sender": result, "secretOutput": "NONE"})
+                return 0 if result.get("ok") else 1
+
+            if command == "http-login-replay-pair":
+                receiver = manager.http_replay_receiver_for_job(hj_id=args.hj_id, event_cb=event)
+                sender = manager.http_replay_sender(hs_id=args.hs_id, event_cb=event)
+                ok = bool(receiver.get("ok")) and bool(sender.get("ok"))
+                _print_json({"ok": ok, "receiver": receiver, "sender": sender, "secretOutput": "NONE"})
+                return 0 if ok else 1
+
+            if command == "http-login-template-capture-receiver":
+                result = manager.http_template_capture_receiver_for_job(hj_id=args.hj_id, event_cb=event)
+                _print_json({"ok": bool(result.get("ok")), "receiver": result, "secretOutput": "NONE"})
+                return 0 if result.get("ok") else 1
+
+            if command == "http-login-template-capture-sender":
+                result = manager.http_template_capture_sender(hs_id=args.hs_id, event_cb=event)
+                _print_json({"ok": bool(result.get("ok")), "sender": result, "secretOutput": "NONE"})
+                return 0 if result.get("ok") else 1
+
+            if command == "http-login-template-replay-receiver":
+                result = manager.http_template_replay_receiver_for_job(hj_id=args.hj_id, event_cb=event)
+                _print_json({"ok": bool(result.get("ok")), "receiver": result, "secretOutput": "NONE"})
+                return 0 if result.get("ok") else 1
+
+            if command == "http-login-template-replay-sender":
+                result = manager.http_template_replay_sender(hs_id=args.hs_id, event_cb=event)
+                _print_json({"ok": bool(result.get("ok")), "sender": result, "secretOutput": "NONE"})
+                return 0 if result.get("ok") else 1
+
+            if command == "http-login-template-replay-pair":
+                receiver = manager.http_template_replay_receiver_for_job(hj_id=args.hj_id, event_cb=event)
+                sender = manager.http_template_replay_sender(hs_id=args.hs_id, event_cb=event)
+                ok = bool(receiver.get("ok")) and bool(sender.get("ok"))
+                _print_json({"ok": ok, "receiver": receiver, "sender": sender, "secretOutput": "NONE"})
+                return 0 if ok else 1
+
+            if command == "http-login-template-reuse-sender":
+                result = manager.http_template_reuse_sender(
+                    template_hs_id=args.template_hs_id,
+                    target_hs_id=args.target_hs_id,
+                    event_cb=event,
+                )
+                _print_json({"ok": bool(result.get("ok")), "sender": result, "secretOutput": "NONE"})
+                return 0 if result.get("ok") else 1
+
+            if command == "http-login-template-reuse-receiver":
+                result = manager.http_template_reuse_receiver_for_job(
+                    template_hr_id=args.template_hr_id,
+                    target_hj_id=args.target_hj_id,
+                    event_cb=event,
+                )
+                _print_json({"ok": bool(result.get("ok")), "receiver": result, "secretOutput": "NONE"})
+                return 0 if result.get("ok") else 1
+
+            if command == "http-login-matrix-receiver":
+                result = manager.http_matrix_receiver_for_job(hj_id=args.hj_id, event_cb=event)
+                _print_json({"ok": bool(result.get("ok")), "receiver": result, "secretOutput": "NONE"})
+                return 0 if result.get("ok") else 1
+
+            if command == "http-login-matrix-sender":
+                result = manager.http_matrix_sender(hs_id=args.hs_id, event_cb=event)
+                _print_json({"ok": bool(result.get("ok")), "sender": result, "secretOutput": "NONE"})
+                return 0 if result.get("ok") else 1
+
+            if command == "http-login-matrix-pair":
+                receiver = manager.http_matrix_receiver_for_job(hj_id=args.hj_id, event_cb=event)
+                sender = manager.http_matrix_sender(hs_id=args.hs_id, event_cb=event)
+                ok = bool(receiver.get("ok")) and bool(sender.get("ok"))
+                _print_json({"ok": ok, "receiver": receiver, "sender": sender, "secretOutput": "NONE"})
+                return 0 if ok else 1
+
+            if command == "http-login-probe-receiver":
+                result = manager.http_probe_receiver_for_job(hj_id=args.hj_id, event_cb=event)
+                _print_json({"ok": bool(result.get("ok")), "receiver": result, "secretOutput": "NONE"})
+                return 0 if result.get("ok") else 1
+
+            if command == "http-login-probe-sender":
+                result = manager.http_probe_sender(hs_id=args.hs_id, event_cb=event)
+                _print_json({"ok": bool(result.get("ok")), "sender": result, "secretOutput": "NONE"})
+                return 0 if result.get("ok") else 1
+
+            receiver = manager.http_probe_receiver_for_job(hj_id=args.hj_id, event_cb=event)
+            sender = manager.http_probe_sender(hs_id=args.hs_id, event_cb=event)
+            ok = bool(receiver.get("ok")) and bool(sender.get("ok"))
+            _print_json({"ok": ok, "receiver": receiver, "sender": sender, "secretOutput": "NONE"})
+            return 0 if ok else 1
 
         if command in {
             "friend-list-test",
