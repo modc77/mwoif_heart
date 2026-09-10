@@ -290,6 +290,122 @@ class HeartRepository:
             (limit,),
         )
 
+
+    def next_round_sequence(self, *, hj_id: int) -> int:
+        row = self.db.fetch_one(
+            "SELECT COALESCE(MAX(sequence_no), 0) + 1 AS n FROM heart_rounds WHERE hj_id=%s",
+            (hj_id,),
+        )
+        return int((row or {"n": 1}).get("n") or 1)
+
+    def mark_job_running(self, *, hj_id: int) -> None:
+        self.db.execute(
+            """
+            UPDATE heart_jobs
+            SET status='running',
+                started_at=COALESCE(started_at, current_timestamp()),
+                last_error_scope=NULL,
+                last_error_code=NULL,
+                last_error_message=NULL
+            WHERE hj_id=%s
+            """,
+            (hj_id,),
+        )
+
+    def mark_round_passed(self, *, hround_id: int) -> None:
+        self.db.execute(
+            """
+            UPDATE heart_rounds
+            SET status='passed',
+                current_step='PASS',
+                last_confirmed_step='REMOVE',
+                heart_amount=1,
+                completed_at=current_timestamp(),
+                recovery_required=0,
+                error_scope=NULL,
+                error_stage=NULL,
+                error_code=NULL,
+                error_message=NULL
+            WHERE hround_id=%s
+            """,
+            (hround_id,),
+        )
+
+    def mark_one_round_success(self, *, hj_id: int, hs_id: int, hr_id: int) -> None:
+        self.db.execute(
+            """
+            UPDATE heart_senders
+            SET last_send_at=current_timestamp(),
+                last_success_at=current_timestamp(),
+                total_rounds=total_rounds+1,
+                total_pass=total_pass+1,
+                health_status='ready',
+                next_available_at=NULL,
+                last_error_stage=NULL,
+                last_error_code=NULL,
+                last_error_message=NULL
+            WHERE hs_id=%s
+            """,
+            (hs_id,),
+        )
+        self.db.execute(
+            """
+            UPDATE heart_receivers
+            SET last_receive_at=current_timestamp(),
+                last_error_stage=NULL,
+                last_error_code=NULL,
+                last_error_message=NULL
+            WHERE hr_id=%s
+            """,
+            (hr_id,),
+        )
+        self.db.execute(
+            """
+            UPDATE heart_jobs
+            SET completed_hearts=completed_hearts+1,
+                successful_rounds=successful_rounds+1,
+                status=CASE
+                    WHEN completed_hearts+1 >= requested_hearts THEN 'completed'
+                    ELSE 'running'
+                END,
+                completed_at=CASE
+                    WHEN completed_hearts+1 >= requested_hearts THEN current_timestamp()
+                    ELSE completed_at
+                END,
+                last_error_scope=NULL,
+                last_error_code=NULL,
+                last_error_message=NULL
+            WHERE hj_id=%s
+            """,
+            (hj_id,),
+        )
+
+    def mark_one_round_failed(self, *, hj_id: int, hs_id: int, hr_id: int, error_scope: str, error_code: str, message: str) -> None:
+        self.db.execute(
+            """
+            UPDATE heart_senders
+            SET total_rounds=total_rounds+1,
+                total_error=total_error+1,
+                last_error_stage=%s,
+                last_error_code=%s,
+                last_error_message=%s
+            WHERE hs_id=%s
+            """,
+            (error_scope, error_code, message[:500], hs_id),
+        )
+        self.db.execute(
+            """
+            UPDATE heart_jobs
+            SET failed_rounds=failed_rounds+1,
+                status=CASE WHEN stop_requested=1 THEN 'stopping' ELSE status END,
+                last_error_scope=%s,
+                last_error_code=%s,
+                last_error_message=%s
+            WHERE hj_id=%s
+            """,
+            (error_scope if error_scope in {"sender", "receiver", "system"} else "system", error_code, message[:500], hj_id),
+        )
+
     def read_dashboard_counts(self) -> dict[str, Any]:
         receivers = self.db.fetch_one("SELECT COUNT(*) AS c FROM heart_receivers") or {"c": 0}
         senders = self.db.fetch_one("SELECT COUNT(*) AS c FROM heart_senders") or {"c": 0}

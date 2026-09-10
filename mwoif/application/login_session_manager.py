@@ -390,6 +390,123 @@ class LoginSessionManager:
         }
 
 
+    def login_receiver_for_job_http_template(
+        self,
+        *,
+        hj_id: int,
+        template_hr_id: int | None = None,
+        event_cb: Event | None = None,
+    ) -> LoginSessionResult:
+        """Login a job receiver with direct HTTP exact-template replay and return runtime objects."""
+        job = self.repo.get_job(hj_id)
+        if not job:
+            raise ConfigError(f"heart job not found: hj_id={hj_id}", stage="HTTP_TEMPLATE_LOGIN_RECEIVER")
+        hr_id = int(job["hr_id"])
+        receiver = self.repo.get_receiver(hr_id)
+        if not receiver:
+            raise ConfigError(f"receiver not found: hr_id={hr_id}", stage="HTTP_TEMPLATE_LOGIN_RECEIVER")
+        email, password = self._decrypt_credential(
+            self.repo.get_receiver_job_vault(hj_id, hr_id),
+            aad=f"heart_receiver_job:{hj_id}:{hr_id}",
+        )
+        return self._http_template_login_session_result(
+            kind="receiver",
+            account_id=hr_id,
+            email=email,
+            password=password,
+            event_cb=event_cb,
+            template_kind="receiver",
+            template_account_id=int(template_hr_id or hr_id),
+        )
+
+    def login_sender_http_template(
+        self,
+        *,
+        hs_id: int,
+        template_hs_id: int | None = None,
+        event_cb: Event | None = None,
+    ) -> LoginSessionResult:
+        """Login a sender with direct HTTP exact-template replay and return runtime objects."""
+        sender = self.repo.get_sender(hs_id)
+        if not sender:
+            raise ConfigError(f"sender not found: hs_id={hs_id}", stage="HTTP_TEMPLATE_LOGIN_SENDER")
+        email, password = self._decrypt_credential(
+            self.repo.get_sender_vault(hs_id),
+            aad=f"heart_sender:{hs_id}",
+        )
+        return self._http_template_login_session_result(
+            kind="sender",
+            account_id=hs_id,
+            email=email,
+            password=password,
+            event_cb=event_cb,
+            template_kind="sender",
+            template_account_id=int(template_hs_id or hs_id),
+        )
+
+    def _http_template_login_session_result(
+        self,
+        *,
+        kind: str,
+        account_id: int,
+        email: str,
+        password: str,
+        event_cb: Event | None,
+        template_kind: str,
+        template_account_id: int,
+    ) -> LoginSessionResult:
+        self._emit(
+            event_cb,
+            f"V3 HTTP EXACT TEMPLATE LOGIN START kind={kind} id={account_id} template={template_kind}:{template_account_id} email={mask_email(email)} browser=NO secretOutput=NONE",
+        )
+        try:
+            replayed: ExactTemplateReplayResult = replay_exact_login_template(
+                self.runtime_cfg,
+                email,
+                password,
+                event_cb=event_cb,
+                account_kind=kind,
+                account_id=account_id,
+                template_account_kind=template_kind,
+                template_account_id=template_account_id,
+            )
+        except Exception as exc:
+            msg = f"{type(exc).__name__}: {exc}"
+            if kind == "receiver":
+                self.repo.update_receiver_runtime_error(hr_id=account_id, stage="HTTP_TEMPLATE_LOGIN", code="HTTP_TEMPLATE_REPLAY_EXCEPTION", message=msg)
+            else:
+                self.repo.update_sender_runtime_error(hs_id=account_id, stage="HTTP_TEMPLATE_LOGIN", code="HTTP_TEMPLATE_REPLAY_EXCEPTION", message=msg)
+            raise AuthError(msg, stage="HTTP_TEMPLATE_LOGIN") from exc
+
+        if not replayed.ok or replayed.bundle is None:
+            msg = replayed.message or replayed.code
+            if kind == "receiver":
+                self.repo.update_receiver_runtime_error(hr_id=account_id, stage="HTTP_TEMPLATE_LOGIN", code=replayed.code, message=msg)
+            else:
+                self.repo.update_sender_runtime_error(hs_id=account_id, stage="HTTP_TEMPLATE_LOGIN", code=replayed.code, message=msg)
+            raise AuthError(msg, stage="HTTP_TEMPLATE_LOGIN")
+
+        auth = self._make_auth_record(kind=kind, account_id=account_id, bundle=replayed.bundle)
+        try:
+            session = bootstrap_session(self.runtime_cfg, kind.upper()[0], auth, event_cb=event_cb)
+        except SessionBootstrapError as exc:
+            msg = f"{type(exc).__name__}: {exc}"
+            if kind == "receiver":
+                self.repo.update_receiver_runtime_error(hr_id=account_id, stage="HTTP_TEMPLATE_SESSION", code="SESSION_INIT_FAILED", message=msg)
+            else:
+                self.repo.update_sender_runtime_error(hs_id=account_id, stage="HTTP_TEMPLATE_SESSION", code="SESSION_INIT_FAILED", message=msg)
+            raise SessionError(msg, stage="HTTP_TEMPLATE_SESSION") from exc
+
+        if kind == "receiver":
+            self.repo.update_receiver_runtime_ok(hr_id=account_id, member_seq=session.member_seq, current_lv=session.current_lv)
+            self.repo.log_event(event_type="RECEIVER_HTTP_TEMPLATE_SESSION_OK", hr_id=account_id, success=True, detail="receiver direct-http exact-template auth/session ready")
+        else:
+            self.repo.update_sender_runtime_ok(hs_id=account_id, member_seq=session.member_seq, current_lv=session.current_lv)
+            self.repo.log_event(event_type="SENDER_HTTP_TEMPLATE_SESSION_OK", hs_id=account_id, success=True, detail="sender direct-http exact-template auth/session ready")
+        self._emit(event_cb, f"V3 HTTP EXACT TEMPLATE SESSION OK kind={kind} id={account_id} memberSeq=present lv={session.current_lv} secretOutput=NONE")
+        return LoginSessionResult(account_kind=kind, account_id=account_id, email_mask=mask_email(email), auth=auth, session=session)
+
+
     def http_matrix_receiver_for_job(self, *, hj_id: int, event_cb: Event | None = None) -> dict[str, Any]:
         job = self.repo.get_job(hj_id)
         if not job:

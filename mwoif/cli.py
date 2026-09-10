@@ -190,6 +190,20 @@ def build_parser() -> argparse.ArgumentParser:
     p = _pair_action("friend-remove-test", "Phase 4: Remove Receiver/Sender friendship")
     p.add_argument("--actor", choices=["sender", "receiver"], default="sender")
 
+
+
+    p = sub.add_parser("heart-round-run", help="Phase 5.0: run one complete Heart round with one Receiver login and one Sender login")
+    p.add_argument("--hj-id", type=int, required=True)
+    p.add_argument("--hs-id", type=int, required=True)
+    p.add_argument("--template-hs-id", type=int, default=None, help="Sender exact-template source id. Defaults to hs-id or MWOIF_HEART_ROUND_TEMPLATE_SENDER_HS_ID")
+    p.add_argument("--template-hr-id", type=int, default=None, help="Receiver exact-template source id. Defaults to job hr-id or MWOIF_HEART_ROUND_TEMPLATE_RECEIVER_HR_ID")
+    p.add_argument("--sequence-no", type=int, default=None, help="Optional fixed round sequence. Defaults to next sequence for the job")
+    p.add_argument("--source-type", type=int, default=2)
+    p.add_argument("--mailbox-attempts", type=int, default=None)
+    p.add_argument("--mailbox-delay-seconds", type=float, default=None)
+    p.add_argument("--verbose-actions", action="store_true", help="Include full redacted action details in final JSON")
+    p.add_argument("--live", action="store_true", help="Execute the real network round. Without this it prints a plan only")
+
     return parser
 
 
@@ -572,6 +586,31 @@ def main(argv: list[str] | None = None) -> int:
             ok = bool(receiver.get("ok")) and bool(sender.get("ok"))
             _print_json({"ok": ok, "receiver": receiver, "sender": sender, "secretOutput": "NONE"})
             return 0 if ok else 1
+
+
+        if command == "heart-round-run":
+            from mwoif.application.heart_round_runner import HeartRoundRunner
+
+            manager = HeartRoundRunner(config, repo, CredentialVault(config.vault))
+
+            def event(text: str) -> None:
+                print(text)
+
+            result = manager.run_one(
+                hj_id=args.hj_id,
+                hs_id=args.hs_id,
+                live=args.live,
+                source_type=args.source_type,
+                template_hs_id=args.template_hs_id,
+                template_hr_id=args.template_hr_id,
+                sequence_no=args.sequence_no,
+                mailbox_attempts=args.mailbox_attempts,
+                mailbox_delay_seconds=args.mailbox_delay_seconds,
+                verbose_actions=args.verbose_actions,
+                event_cb=event,
+            )
+            _print_json(result)
+            return 0 if result.get("ok") else 1
 
         if command in {
             "friend-list-test",
