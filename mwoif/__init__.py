@@ -1,6 +1,4 @@
-"""MWOIF Heart V3 package root.
+from __future__ import annotations
 
-V1/V2 reference code is stored under backup/ and should not be edited directly.
-"""
-
-__version__ = "3.0.0-dev"
+__app_name__ = "M WOIF Heart V3"
+__version__ = "3.0.0-phase4"

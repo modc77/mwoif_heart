@@ -1,0 +1,30 @@
+{
+  "schema": "mwoif-auth-cache-v1",
+  "slot": "B",
+  "mid": "WSVXV3143",
+  "game_access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJjcmciLCJleHAiOjE3ODg5Nzk3MzEsImlzcyI6Im92ZW5jbG91ZCIsInN1YiI6IldTVlhWMzE0MyIsInFjbnQiOjAsInFkdCI6MCwibmFtZSI6IiIsIm1haWwiOiIiLCJmbmFtZSI6IiIsImZwaWMiOiIifQ.64WWUNzDyCd6iGaKECBuD88grK2OgjU03w-NFpqs_1Q",
+  "fgs_id": "820c7a91-8f0a-4647-97da-7ab190db2d04",
+  "device_id": "ffa0229d7ac5e676",
+  "source": "game_owned_materializer",
+  "metadata": {
+    "runtime-metadata-version": "V13.6.1",
+    "player-id": "WSVXV3143",
+    "version": "26.8.02",
+    "version-code": "651",
+    "timezone": "Asia/Bangkok",
+    "country": "US",
+    "os.type": "A",
+    "os_version": "12",
+    "locale": "en-US",
+    "device-name": "SM-A156E",
+    "device-model": "SM-A156E",
+    "device-id": "ffa0229d7ac5e676",
+    "index-file-hash": "71c2fe2247b746f7570e7e6ae5670c69",
+    "time-zone-distance": "25200",
+    "game-process-elapsed-ms": "97579",
+    "fgs-id": "820c7a91-8f0a-4647-97da-7ab190db2d04",
+    "market_type": "GOOGLE_PLAY",
+    "friend-grpc-target": "gserver.live.prod.devsnova.cloud:443"
+  },
+  "imported_at": "2026-09-09T18:21:54.726232+00:00"
+}

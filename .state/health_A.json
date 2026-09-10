@@ -1,0 +1,11 @@
+{
+  "slot": "A",
+  "checked_at": "2026-09-09T19:50:01.579940+00:00",
+  "status": "PASS",
+  "auth_online": true,
+  "session_online": true,
+  "auth_detail": "Friend List gRPC ผ่าน",
+  "session_detail": "myMailList.ds ผ่าน",
+  "auth_elapsed_ms": 875.0,
+  "session_elapsed_ms": 796.0
+}

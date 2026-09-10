@@ -1,0 +1,26 @@
+{
+  "schema": "mwoif-auth-v13.1",
+  "mid": "KMSLM6355",
+  "game_access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhdWQiOiJjcmciLCJleHAiOjE3ODg5ODQxOTMsImlzcyI6Im92ZW5jbG91ZCIsInN1YiI6IktNU0xNNjM1NSIsInFjbnQiOjAsInFkdCI6MCwibmFtZSI6IiIsIm1haWwiOiIiLCJmbmFtZSI6IiIsImZwaWMiOiIifQ.3gYKifokpUBK4rA-X36Tmh5CHaHFhwaSdlYzAKd1LeI",
+  "source": "game_owned_materializer",
+  "metadata": {
+    "runtime-metadata-version": "V13.6.1",
+    "player-id": "KMSLM6355",
+    "version": "26.8.02",
+    "version-code": "651",
+    "timezone": "Asia\/Bangkok",
+    "country": "US",
+    "os.type": "A",
+    "os_version": "12",
+    "locale": "en-US",
+    "device-name": "SM-A156E",
+    "device-model": "SM-A156E",
+    "device-id": "ffa0229d7ac5e676",
+    "index-file-hash": "71c2fe2247b746f7570e7e6ae5670c69",
+    "time-zone-distance": "25200",
+    "game-process-elapsed-ms": "4660906",
+    "fgs-id": "5ad8c2b6-a212-4a46-9f27-7d580edb6a66",
+    "market_type": "GOOGLE_PLAY",
+    "friend-grpc-target": "gserver.live.prod.devsnova.cloud:443"
+  }
+}

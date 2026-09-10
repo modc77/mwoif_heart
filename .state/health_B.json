@@ -1,0 +1,11 @@
+{
+  "slot": "B",
+  "checked_at": "2026-09-09T19:41:27.648191+00:00",
+  "status": "AUTH_EXPIRED",
+  "auth_online": false,
+  "session_online": null,
+  "auth_detail": "game_access_token เลยเวลา exp แล้ว",
+  "session_detail": "",
+  "auth_elapsed_ms": null,
+  "session_elapsed_ms": null
+}
