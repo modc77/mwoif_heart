@@ -63,6 +63,31 @@ class LoginSessionManager:
             raise CredentialError("credential payload missing email/password", stage="VAULT_READ")
         return email, password
 
+
+    def _decrypt_sender_credential(self, hs_id: int) -> tuple[str, str]:
+        """Read sender email from sender vault and password from per-sender or shared vault.
+
+        Phase 5.1 supports 10k manually provisioned sender accounts with one
+        stable shared password.  Each sender still keeps an encrypted identity
+        row so the raw email is never stored in plaintext DB columns.
+        """
+        blob = self.repo.get_sender_vault(hs_id)
+        if blob is None:
+            raise CredentialError("sender identity/credential vault row not found", stage="SENDER_VAULT_READ")
+        data = self.vault.decrypt_json(blob, aad=f"heart_sender:{hs_id}")
+        email = str(data.get("email") or "").strip()
+        password = str(data.get("password") or "")
+        if not password:
+            shared_name = str(data.get("shared_credential") or "default").strip() or "default"
+            shared_blob = self.repo.get_shared_sender_credential(shared_name)
+            if shared_blob is None:
+                raise CredentialError(f"shared sender credential not found: {shared_name}", stage="SENDER_SHARED_VAULT_READ")
+            shared_data = self.vault.decrypt_json(shared_blob, aad=f"heart_sender_shared:{shared_name}")
+            password = str(shared_data.get("password") or "")
+        if not email or not password:
+            raise CredentialError("sender credential payload missing email/password", stage="SENDER_VAULT_READ")
+        return email, password
+
     def _load_private_query(self) -> dict[str, str]:
         raw_path = self.runtime_cfg.raw.get("v2", {}).get("login_web_context", {}).get("private_context_file")
         path = self.runtime_cfg.root / str(raw_path or "state/login_web_context.private.json")
@@ -149,10 +174,7 @@ class LoginSessionManager:
         sender = self.repo.get_sender(hs_id)
         if not sender:
             raise ConfigError(f"sender not found: hs_id={hs_id}", stage="HTTP_TEMPLATE_CAPTURE_SENDER")
-        email, password = self._decrypt_credential(
-            self.repo.get_sender_vault(hs_id),
-            aad=f"heart_sender:{hs_id}",
-        )
+        email, password = self._decrypt_sender_credential(hs_id)
         return self._http_template_capture(kind="sender", account_id=hs_id, email=email, password=password, event_cb=event_cb)
 
     def _http_template_capture(self, *, kind: str, account_id: int, email: str, password: str, event_cb: Event | None) -> dict[str, Any]:
@@ -223,10 +245,7 @@ class LoginSessionManager:
         sender = self.repo.get_sender(hs_id)
         if not sender:
             raise ConfigError(f"sender not found: hs_id={hs_id}", stage="HTTP_TEMPLATE_REPLAY_SENDER")
-        email, password = self._decrypt_credential(
-            self.repo.get_sender_vault(hs_id),
-            aad=f"heart_sender:{hs_id}",
-        )
+        email, password = self._decrypt_sender_credential(hs_id)
         return self._http_template_replay(kind="sender", account_id=hs_id, email=email, password=password, event_cb=event_cb)
 
     def http_template_reuse_sender(self, *, template_hs_id: int, target_hs_id: int, event_cb: Event | None = None) -> dict[str, Any]:
@@ -239,10 +258,7 @@ class LoginSessionManager:
         sender = self.repo.get_sender(target_hs_id)
         if not sender:
             raise ConfigError(f"target sender not found: hs_id={target_hs_id}", stage="HTTP_TEMPLATE_REUSE_SENDER")
-        email, password = self._decrypt_credential(
-            self.repo.get_sender_vault(target_hs_id),
-            aad=f"heart_sender:{target_hs_id}",
-        )
+        email, password = self._decrypt_sender_credential(target_hs_id)
         return self._http_template_replay(
             kind="sender",
             account_id=target_hs_id,
@@ -430,10 +446,7 @@ class LoginSessionManager:
         sender = self.repo.get_sender(hs_id)
         if not sender:
             raise ConfigError(f"sender not found: hs_id={hs_id}", stage="HTTP_TEMPLATE_LOGIN_SENDER")
-        email, password = self._decrypt_credential(
-            self.repo.get_sender_vault(hs_id),
-            aad=f"heart_sender:{hs_id}",
-        )
+        email, password = self._decrypt_sender_credential(hs_id)
         return self._http_template_login_session_result(
             kind="sender",
             account_id=hs_id,
@@ -525,10 +538,7 @@ class LoginSessionManager:
         sender = self.repo.get_sender(hs_id)
         if not sender:
             raise ConfigError(f"sender not found: hs_id={hs_id}", stage="HTTP_MATRIX_SENDER")
-        email, password = self._decrypt_credential(
-            self.repo.get_sender_vault(hs_id),
-            aad=f"heart_sender:{hs_id}",
-        )
+        email, password = self._decrypt_sender_credential(hs_id)
         return self._http_matrix_login(kind="sender", account_id=hs_id, email=email, password=password, event_cb=event_cb)
 
     def _http_matrix_login(self, *, kind: str, account_id: int, email: str, password: str, event_cb: Event | None) -> dict[str, Any]:
@@ -642,10 +652,7 @@ class LoginSessionManager:
         sender = self.repo.get_sender(hs_id)
         if not sender:
             raise ConfigError(f"sender not found: hs_id={hs_id}", stage="HTTP_REPLAY_SENDER")
-        email, password = self._decrypt_credential(
-            self.repo.get_sender_vault(hs_id),
-            aad=f"heart_sender:{hs_id}",
-        )
+        email, password = self._decrypt_sender_credential(hs_id)
         return self._http_replay_login(kind="sender", account_id=hs_id, email=email, password=password, event_cb=event_cb)
 
     def _http_replay_login(self, *, kind: str, account_id: int, email: str, password: str, event_cb: Event | None) -> dict[str, Any]:
@@ -752,10 +759,7 @@ class LoginSessionManager:
         sender = self.repo.get_sender(hs_id)
         if not sender:
             raise ConfigError(f"sender not found: hs_id={hs_id}", stage="HTTP_RECORD_SENDER")
-        email, password = self._decrypt_credential(
-            self.repo.get_sender_vault(hs_id),
-            aad=f"heart_sender:{hs_id}",
-        )
+        email, password = self._decrypt_sender_credential(hs_id)
         return self._http_record_login(kind="sender", account_id=hs_id, email=email, password=password, event_cb=event_cb)
 
     def _http_record_login(self, *, kind: str, account_id: int, email: str, password: str, event_cb: Event | None) -> dict[str, Any]:
@@ -875,10 +879,7 @@ class LoginSessionManager:
         sender = self.repo.get_sender(hs_id)
         if not sender:
             raise ConfigError(f"sender not found: hs_id={hs_id}", stage="HTTP_PROBE_SENDER")
-        email, password = self._decrypt_credential(
-            self.repo.get_sender_vault(hs_id),
-            aad=f"heart_sender:{hs_id}",
-        )
+        email, password = self._decrypt_sender_credential(hs_id)
         return self._http_probe_login(kind="sender", account_id=hs_id, email=email, password=password, event_cb=event_cb)
 
     def _http_probe_login(self, *, kind: str, account_id: int, email: str, password: str, event_cb: Event | None) -> dict[str, Any]:
@@ -985,10 +986,7 @@ class LoginSessionManager:
         sender = self.repo.get_sender(hs_id)
         if not sender:
             raise ConfigError(f"sender not found: hs_id={hs_id}", stage="LOGIN_SENDER")
-        email, password = self._decrypt_credential(
-            self.repo.get_sender_vault(hs_id),
-            aad=f"heart_sender:{hs_id}",
-        )
+        email, password = self._decrypt_sender_credential(hs_id)
         return self._login(kind="sender", account_id=hs_id, email=email, password=password, event_cb=event_cb)
 
     def _login(self, *, kind: str, account_id: int, email: str, password: str, event_cb: Event | None) -> LoginSessionResult:

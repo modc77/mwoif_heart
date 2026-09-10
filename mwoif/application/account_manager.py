@@ -78,3 +78,55 @@ class AccountManager:
 
     def create_round(self, *, hj_id: int, hs_id: int, hr_id: int, sequence_no: int) -> dict[str, Any]:
         return self.repo.create_round(hj_id=hj_id, hs_id=hs_id, hr_id=hr_id, sequence_no=sequence_no)
+
+    def store_shared_sender_password(self, *, credential_name: str, password: str) -> None:
+        if self.vault is None:
+            raise ConfigError("CredentialVault is required", stage="SENDER_SHARED_VAULT")
+        name = (credential_name or "default").strip() or "default"
+        blob = self.vault.encrypt_json({"credential_name": name, "password": password}, aad=f"heart_sender_shared:{name}")
+        self.repo.upsert_shared_sender_credential(credential_name=name, blob=blob)
+
+    def store_sender_identity_with_shared_password(self, hs_id: int, *, email: str, shared_credential: str = "default") -> None:
+        if self.vault is None:
+            raise ConfigError("CredentialVault is required", stage="SENDER_VAULT")
+        name = (shared_credential or "default").strip() or "default"
+        blob = self.vault.encrypt_json({"email": email, "password_mode": "shared", "shared_credential": name}, aad=f"heart_sender:{hs_id}")
+        self.repo.upsert_sender_vault(hs_id=hs_id, blob=blob)
+
+    def import_sender_pattern(
+        self,
+        *,
+        prefix: str,
+        domain: str,
+        start: int,
+        end: int,
+        width: int = 5,
+        label_prefix: str = "Sender",
+        shared_credential: str = "default",
+        store_shared_identity: bool = True,
+    ) -> dict[str, Any]:
+        if start <= 0 or end < start:
+            raise ConfigError("invalid sender pattern range", stage="SENDER_IMPORT_PATTERN")
+        if end - start + 1 > 20000:
+            raise ConfigError("sender pattern import limit is 20000 per command", stage="SENDER_IMPORT_PATTERN")
+        domain_clean = domain.strip().lstrip("@").lower()
+        created: list[dict[str, Any]] = []
+        updated = 0
+        for n in range(start, end + 1):
+            suffix = str(n).zfill(width)
+            email = f"{prefix}{suffix}@{domain_clean}"
+            label = f"{label_prefix}{suffix}"
+            sender = self.ensure_sender(label, email)
+            if store_shared_identity:
+                self.store_sender_identity_with_shared_password(sender.hs_id, email=email, shared_credential=shared_credential)
+            created.append({"hs_id": sender.hs_id, "label": sender.label, "email_mask": sender.email_mask})
+            updated += 1
+        return {
+            "ok": True,
+            "count": updated,
+            "first": created[0] if created else None,
+            "last": created[-1] if created else None,
+            "shared_credential": shared_credential,
+            "sender_vault_identity_stored": store_shared_identity,
+            "secretOutput": "NONE",
+        }

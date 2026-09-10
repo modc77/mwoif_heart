@@ -61,6 +61,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--label", required=True)
     p.add_argument("--email", required=True)
     p.add_argument("--store-credential", action="store_true", help="Prompt and store encrypted sender credential")
+    p.add_argument("--use-shared-password", action="store_true", help="Store sender identity but use shared sender password at login")
+    p.add_argument("--shared-credential", default="default")
 
     p = sub.add_parser("sender-vault-set", help="Prompt and store encrypted credential for an existing sender")
     p.add_argument("--hs-id", type=int, required=True)
@@ -204,6 +206,40 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--verbose-actions", action="store_true", help="Include full redacted action details in final JSON")
     p.add_argument("--live", action="store_true", help="Execute the real network round. Without this it prints a plan only")
 
+
+    sub.add_parser("prod-schema-status", help="Phase 5.1: check production-local tables")
+    sub.add_parser("prod-schema-apply", help="Phase 5.1: apply production-local DB migration")
+
+    p = sub.add_parser("prod-status", help="Phase 5.1: production dashboard counts")
+    p.add_argument("--hj-id", type=int, default=None)
+
+    p = sub.add_parser("sender-shared-password-set", help="Phase 5.1: store one encrypted shared password for sender pool")
+    p.add_argument("--name", default="default")
+
+    p = sub.add_parser("sender-import-pattern", help="Phase 5.1: import existing sender emails by pattern using shared password")
+    p.add_argument("--prefix", required=True, help="Example: mwoifheart")
+    p.add_argument("--start", type=int, required=True, help="Example: 1")
+    p.add_argument("--end", type=int, required=True, help="Example: 1000")
+    p.add_argument("--width", type=int, default=5, help="Example: 5 -> 00001")
+    p.add_argument("--domain", default="gmail.com")
+    p.add_argument("--label-prefix", default="Sender")
+    p.add_argument("--shared-credential", default="default")
+
+    p = sub.add_parser("sender-eligible", help="Phase 5.1: count senders eligible for one job receiver")
+    p.add_argument("--hj-id", type=int, required=True)
+
+    p = sub.add_parser("heart-job-run", help="Phase 5.1: run one job with random sender replacement and pair cooldown")
+    p.add_argument("--hj-id", type=int, required=True)
+    p.add_argument("--template-hs-id", type=int, default=None)
+    p.add_argument("--template-hr-id", type=int, default=None)
+    p.add_argument("--source-type", type=int, default=2)
+    p.add_argument("--max-rounds", type=int, default=None, help="Safety cap for this local run")
+    p.add_argument("--lease-seconds", type=int, default=None)
+    p.add_argument("--cooldown-seconds", type=int, default=None)
+    p.add_argument("--mailbox-attempts", type=int, default=None)
+    p.add_argument("--mailbox-delay-seconds", type=float, default=None)
+    p.add_argument("--live", action="store_true")
+
     return parser
 
 
@@ -287,19 +323,27 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if command == "sender-add":
-            manager = AccountManager(repo, CredentialVault(config.vault) if args.store_credential else None)
+            needs_vault = bool(args.store_credential or args.use_shared_password)
+            manager = AccountManager(repo, CredentialVault(config.vault) if needs_vault else None)
             sender = manager.ensure_sender(args.label, args.email)
             credential_stored = False
+            uses_shared_password = False
             if args.store_credential:
                 password = _prompt_secret("Sender password: ")
                 manager.store_sender_credential(sender.hs_id, email=args.email, password=password)
                 credential_stored = True
+            elif args.use_shared_password:
+                manager.store_sender_identity_with_shared_password(sender.hs_id, email=args.email, shared_credential=args.shared_credential)
+                credential_stored = True
+                uses_shared_password = True
             repo.log_event(event_type="SENDER_UPSERT", hs_id=sender.hs_id, success=True, detail="sender identity stored")
             _print_json(
                 {
                     "ok": True,
                     "sender": asdict(sender),
                     "credential_stored": credential_stored,
+                    "uses_shared_password": uses_shared_password,
+                    "shared_credential": args.shared_credential if uses_shared_password else None,
                     "secretOutput": "NONE",
                 }
             )
@@ -586,6 +630,78 @@ def main(argv: list[str] | None = None) -> int:
             ok = bool(receiver.get("ok")) and bool(sender.get("ok"))
             _print_json({"ok": ok, "receiver": receiver, "sender": sender, "secretOutput": "NONE"})
             return 0 if ok else 1
+
+
+        if command == "prod-schema-status":
+            status = repo.check_production_tables()
+            missing = [row["table"] for row in status if not row["exists"]]
+            _print_json({"ok": not missing, "tables": status, "missing": missing, "secretOutput": "NONE"})
+            return 0 if not missing else 2
+
+        if command == "prod-schema-apply":
+            result = repo.apply_production_schema()
+            _print_json(result)
+            return 0 if result.get("ok") else 1
+
+        if command == "prod-status":
+            _print_json(repo.production_dashboard(hj_id=args.hj_id))
+            return 0
+
+        if command == "sender-shared-password-set":
+            manager = AccountManager(repo, CredentialVault(config.vault))
+            password = _prompt_secret("Shared sender password: ")
+            manager.store_shared_sender_password(credential_name=args.name, password=password)
+            repo.log_event(event_type="SENDER_SHARED_PASSWORD_SET", success=True, detail="shared sender credential updated")
+            _print_json({"ok": True, "credential_name": args.name, "credential_stored": True, "secretOutput": "NONE"})
+            return 0
+
+        if command == "sender-import-pattern":
+            manager = AccountManager(repo, CredentialVault(config.vault))
+            result = manager.import_sender_pattern(
+                prefix=args.prefix,
+                domain=args.domain,
+                start=args.start,
+                end=args.end,
+                width=args.width,
+                label_prefix=args.label_prefix,
+                shared_credential=args.shared_credential,
+                store_shared_identity=True,
+            )
+            repo.log_event(event_type="SENDER_PATTERN_IMPORT", success=True, detail=f"imported sender pattern count={result.get('count')}")
+            _print_json(result)
+            return 0
+
+        if command == "sender-eligible":
+            job = repo.get_job(args.hj_id)
+            if not job:
+                raise MwoifHeartError(f"heart job not found: hj_id={args.hj_id}", stage="SENDER_ELIGIBLE")
+            counts = repo.eligible_sender_counts(hj_id=args.hj_id, hr_id=int(job["hr_id"]))
+            _print_json({"ok": True, "hj_id": args.hj_id, "hr_id": int(job["hr_id"]), "eligible": counts, "secretOutput": "NONE"})
+            return 0
+
+        if command == "heart-job-run":
+            from mwoif.application.production_job_runner import ProductionJobRunner
+
+            manager = ProductionJobRunner(config, repo, CredentialVault(config.vault))
+
+            def event(text: str) -> None:
+                print(text)
+
+            result = manager.run_job(
+                hj_id=args.hj_id,
+                live=args.live,
+                template_hs_id=args.template_hs_id,
+                template_hr_id=args.template_hr_id,
+                source_type=args.source_type,
+                max_rounds=args.max_rounds,
+                lease_seconds=args.lease_seconds,
+                cooldown_seconds=args.cooldown_seconds,
+                mailbox_attempts=args.mailbox_attempts,
+                mailbox_delay_seconds=args.mailbox_delay_seconds,
+                event_cb=event,
+            )
+            _print_json(result)
+            return 0 if result.get("ok") else 1
 
 
         if command == "heart-round-run":

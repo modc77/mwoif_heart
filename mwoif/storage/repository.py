@@ -511,3 +511,317 @@ class HeartRepository:
             """,
             (stage, code, message[:500], hs_id),
         )
+
+    # ---------------- Phase 5.1 production-local foundation ----------------
+    def check_production_tables(self) -> list[dict[str, Any]]:
+        from mwoif.storage.production_schema import PRODUCTION_TABLES
+
+        placeholders = ",".join(["%s"] * len(PRODUCTION_TABLES))
+        rows = self.db.fetch_all(
+            f"""
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema = DATABASE()
+              AND table_name IN ({placeholders})
+            """,
+            PRODUCTION_TABLES,
+        )
+        found = {str(row["table_name"]) for row in rows}
+        return [{"table": name, "exists": name in found} for name in PRODUCTION_TABLES]
+
+    def apply_production_schema(self) -> dict[str, Any]:
+        from mwoif.storage.production_schema import DDL_STATEMENTS, MIGRATION_ID, PRODUCTION_TABLES, SETTING_DEFAULTS
+
+        for sql in DDL_STATEMENTS:
+            self.db.execute(sql)
+        for key, value in SETTING_DEFAULTS.items():
+            self.upsert_setting(key, value)
+        # Backfill pair cooldowns from recent successful Phase 5.0 rounds so
+        # a sender that just sent to the same receiver is not immediately
+        # selected again after applying this migration.
+        self.db.execute(
+            """
+            INSERT INTO heart_sender_receiver_cooldowns
+                (hs_id, hr_id, last_success_at, eligible_at, success_count)
+            SELECT hs_id, hr_id, MAX(COALESCE(completed_at, updated_at)),
+                   DATE_ADD(MAX(COALESCE(completed_at, updated_at)), INTERVAL 3600 SECOND),
+                   COUNT(*)
+            FROM heart_rounds
+            WHERE status='passed'
+              AND COALESCE(completed_at, updated_at) > DATE_SUB(current_timestamp(), INTERVAL 1 HOUR)
+            GROUP BY hs_id, hr_id
+            ON DUPLICATE KEY UPDATE
+                last_success_at=GREATEST(last_success_at, VALUES(last_success_at)),
+                eligible_at=GREATEST(eligible_at, VALUES(eligible_at)),
+                success_count=success_count+VALUES(success_count)
+            """
+        )
+        self.db.execute(
+            """
+            INSERT INTO heart_prod_migrations (migration_id, description)
+            VALUES (%s, %s)
+            ON DUPLICATE KEY UPDATE applied_at=applied_at
+            """,
+            (MIGRATION_ID, "Phase 5.1 production local foundation tables"),
+        )
+        status = self.check_production_tables()
+        missing = [row["table"] for row in status if not row["exists"]]
+        return {
+            "ok": not missing,
+            "migration_id": MIGRATION_ID,
+            "tables": status,
+            "missing": missing,
+            "table_count": len(PRODUCTION_TABLES),
+            "secretOutput": "NONE",
+        }
+
+    def upsert_shared_sender_credential(self, *, credential_name: str, blob: VaultBlob) -> None:
+        self.db.execute(
+            """
+            INSERT INTO heart_sender_shared_credentials
+                (credential_name, ciphertext, iv, auth_tag, key_version, active)
+            VALUES (%s, %s, %s, %s, %s, 1)
+            ON DUPLICATE KEY UPDATE
+                ciphertext=VALUES(ciphertext),
+                iv=VALUES(iv),
+                auth_tag=VALUES(auth_tag),
+                key_version=VALUES(key_version),
+                active=1
+            """,
+            (credential_name, blob.ciphertext, blob.iv, blob.auth_tag, blob.key_version),
+        )
+
+    def get_shared_sender_credential(self, credential_name: str = "default") -> VaultBlob | None:
+        row = self.db.fetch_one(
+            """
+            SELECT ciphertext, iv, auth_tag, key_version
+            FROM heart_sender_shared_credentials
+            WHERE credential_name=%s AND active=1
+            """,
+            (credential_name,),
+        )
+        if row is None:
+            return None
+        return VaultBlob(
+            ciphertext=bytes(row["ciphertext"]),
+            iv=bytes(row["iv"]),
+            auth_tag=bytes(row["auth_tag"]),
+            key_version=int(row.get("key_version") or 1),
+        )
+
+    def production_dashboard(self, *, hj_id: int | None = None) -> dict[str, Any]:
+        prod_tables = self.check_production_tables()
+        sender_counts = self.db.fetch_one(
+            """
+            SELECT
+              COUNT(*) AS total,
+              SUM(CASE WHEN enabled=1 THEN 1 ELSE 0 END) AS enabled_count,
+              SUM(CASE WHEN enabled=1 AND health_status IN ('ready','unknown') THEN 1 ELSE 0 END) AS selectable_count,
+              SUM(CASE WHEN enabled=0 OR health_status IN ('error','disabled') THEN 1 ELSE 0 END) AS needs_attention_count
+            FROM heart_senders
+            """
+        ) or {}
+        lease_count = self.db.fetch_one("SELECT COUNT(*) AS c FROM heart_sender_leases WHERE leased_until > current_timestamp()") or {"c": 0}
+        cooldown_count = self.db.fetch_one("SELECT COUNT(*) AS c FROM heart_sender_receiver_cooldowns WHERE eligible_at > current_timestamp()") or {"c": 0}
+        shared = self.db.fetch_one("SELECT COUNT(*) AS c FROM heart_sender_shared_credentials WHERE active=1") or {"c": 0}
+        out: dict[str, Any] = {
+            "ok": all(bool(row["exists"]) for row in prod_tables),
+            "production_tables": prod_tables,
+            "senders": {
+                "total": int(sender_counts.get("total") or 0),
+                "enabled": int(sender_counts.get("enabled_count") or 0),
+                "selectable": int(sender_counts.get("selectable_count") or 0),
+                "needs_attention": int(sender_counts.get("needs_attention_count") or 0),
+                "leased_active": int(lease_count.get("c") or 0),
+                "cooldown_pairs_active": int(cooldown_count.get("c") or 0),
+                "shared_credentials_active": int(shared.get("c") or 0),
+            },
+            "secretOutput": "NONE",
+        }
+        if hj_id is not None:
+            rows = self.db.fetch_all(
+                """
+                SELECT status, COUNT(*) AS c
+                FROM heart_job_sender_attempts
+                WHERE hj_id=%s
+                GROUP BY status
+                ORDER BY status
+                """,
+                (hj_id,),
+            )
+            out["job_attempts"] = {str(row["status"]): int(row["c"]) for row in rows}
+        return out
+
+    def eligible_sender_counts(self, *, hj_id: int, hr_id: int) -> dict[str, Any]:
+        row = self.db.fetch_one(
+            """
+            SELECT
+              COUNT(*) AS total,
+              SUM(CASE WHEN s.enabled=1 AND s.health_status IN ('ready','unknown') THEN 1 ELSE 0 END) AS base_selectable,
+              SUM(CASE WHEN l.hs_id IS NOT NULL AND l.leased_until > current_timestamp() THEN 1 ELSE 0 END) AS leased,
+              SUM(CASE WHEN a.hs_id IS NOT NULL THEN 1 ELSE 0 END) AS already_attempted,
+              SUM(CASE WHEN c.hs_id IS NOT NULL AND c.eligible_at > current_timestamp() THEN 1 ELSE 0 END) AS cooldown,
+              SUM(CASE WHEN s.enabled=1 AND s.health_status IN ('ready','unknown')
+                         AND (s.next_available_at IS NULL OR s.next_available_at <= current_timestamp())
+                         AND (l.hs_id IS NULL OR l.leased_until <= current_timestamp())
+                         AND a.hs_id IS NULL
+                         AND (c.hs_id IS NULL OR c.eligible_at <= current_timestamp())
+                       THEN 1 ELSE 0 END) AS eligible
+            FROM heart_senders s
+            LEFT JOIN heart_sender_leases l ON l.hs_id=s.hs_id
+            LEFT JOIN heart_job_sender_attempts a ON a.hj_id=%s AND a.hs_id=s.hs_id
+            LEFT JOIN heart_sender_receiver_cooldowns c ON c.hs_id=s.hs_id AND c.hr_id=%s
+            """,
+            (hj_id, hr_id),
+        ) or {}
+        return {k: int(row.get(k) or 0) for k in ("total", "base_selectable", "leased", "already_attempted", "cooldown", "eligible")}
+
+    def cleanup_expired_leases(self) -> int:
+        return self.db.execute("DELETE FROM heart_sender_leases WHERE leased_until <= current_timestamp()")
+
+    def lease_random_sender(self, *, hj_id: int, hr_id: int, worker_id: str, lease_seconds: int) -> dict[str, Any] | None:
+        import uuid
+
+        self.cleanup_expired_leases()
+        token = str(uuid.uuid4())
+        affected = self.db.execute(
+            """
+            INSERT INTO heart_sender_leases (hs_id, hj_id, worker_id, lease_token, leased_until)
+            SELECT s.hs_id, %s, %s, %s, DATE_ADD(current_timestamp(), INTERVAL %s SECOND)
+            FROM heart_senders s
+            LEFT JOIN heart_sender_leases l ON l.hs_id=s.hs_id AND l.leased_until > current_timestamp()
+            LEFT JOIN heart_job_sender_attempts a ON a.hj_id=%s AND a.hs_id=s.hs_id
+            LEFT JOIN heart_sender_receiver_cooldowns c ON c.hs_id=s.hs_id AND c.hr_id=%s AND c.eligible_at > current_timestamp()
+            WHERE s.enabled=1
+              AND s.health_status IN ('ready','unknown')
+              AND (s.next_available_at IS NULL OR s.next_available_at <= current_timestamp())
+              AND l.hs_id IS NULL
+              AND a.hs_id IS NULL
+              AND c.hs_id IS NULL
+            ORDER BY RAND()
+            LIMIT 1
+            """,
+            (hj_id, worker_id, token, lease_seconds, hj_id, hr_id),
+        )
+        if affected <= 0:
+            return None
+        row = self.db.fetch_one(
+            """
+            SELECT l.hs_id, l.hj_id, l.worker_id, l.lease_token, l.leased_until,
+                   s.label, s.email_mask, s.health_status, s.enabled
+            FROM heart_sender_leases l
+            JOIN heart_senders s ON s.hs_id=l.hs_id
+            WHERE l.lease_token=%s
+            """,
+            (token,),
+        )
+        if not row:
+            return None
+        self.db.execute(
+            """
+            INSERT INTO heart_job_sender_attempts (hj_id, hs_id, hr_id, status, lease_token)
+            VALUES (%s, %s, %s, 'leased', %s)
+            ON DUPLICATE KEY UPDATE status='leased', lease_token=VALUES(lease_token)
+            """,
+            (hj_id, int(row["hs_id"]), hr_id, token),
+        )
+        return row
+
+    def attach_lease_round(self, *, hs_id: int, lease_token: str, hround_id: int) -> None:
+        self.db.execute(
+            "UPDATE heart_sender_leases SET hround_id=%s WHERE hs_id=%s AND lease_token=%s",
+            (hround_id, hs_id, lease_token),
+        )
+        self.db.execute(
+            "UPDATE heart_job_sender_attempts SET hround_id=%s WHERE hs_id=%s AND lease_token=%s",
+            (hround_id, hs_id, lease_token),
+        )
+
+    def mark_sender_attempt_running(self, *, hj_id: int, hs_id: int, hround_id: int | None, sequence_no: int | None) -> None:
+        self.db.execute(
+            """
+            UPDATE heart_job_sender_attempts
+            SET status='running', hround_id=%s, sequence_no=%s, started_at=COALESCE(started_at, current_timestamp())
+            WHERE hj_id=%s AND hs_id=%s
+            """,
+            (hround_id, sequence_no, hj_id, hs_id),
+        )
+
+    def mark_sender_attempt_passed(self, *, hj_id: int, hs_id: int, hround_id: int | None, sequence_no: int | None) -> None:
+        self.db.execute(
+            """
+            UPDATE heart_job_sender_attempts
+            SET status='passed', hround_id=%s, sequence_no=%s, completed_at=current_timestamp(),
+                error_scope=NULL, error_stage=NULL, error_code=NULL, error_message=NULL
+            WHERE hj_id=%s AND hs_id=%s
+            """,
+            (hround_id, sequence_no, hj_id, hs_id),
+        )
+
+    def mark_sender_attempt_failed(
+        self,
+        *,
+        hj_id: int,
+        hs_id: int,
+        hround_id: int | None,
+        sequence_no: int | None,
+        error_scope: str,
+        error_stage: str,
+        error_code: str,
+        error_message: str,
+    ) -> None:
+        self.db.execute(
+            """
+            UPDATE heart_job_sender_attempts
+            SET status='failed', hround_id=%s, sequence_no=%s, completed_at=current_timestamp(),
+                error_scope=%s, error_stage=%s, error_code=%s, error_message=%s
+            WHERE hj_id=%s AND hs_id=%s
+            """,
+            (hround_id, sequence_no, error_scope if error_scope in {"sender", "receiver", "system"} else "system", error_stage, error_code, error_message[:500], hj_id, hs_id),
+        )
+
+    def release_sender_lease(self, *, hs_id: int, lease_token: str | None = None) -> int:
+        if lease_token:
+            return self.db.execute("DELETE FROM heart_sender_leases WHERE hs_id=%s AND lease_token=%s", (hs_id, lease_token))
+        return self.db.execute("DELETE FROM heart_sender_leases WHERE hs_id=%s", (hs_id,))
+
+    def mark_sender_receiver_cooldown(self, *, hs_id: int, hr_id: int, cooldown_seconds: int) -> None:
+        self.db.execute(
+            """
+            INSERT INTO heart_sender_receiver_cooldowns (hs_id, hr_id, last_success_at, eligible_at, success_count)
+            VALUES (%s, %s, current_timestamp(), DATE_ADD(current_timestamp(), INTERVAL %s SECOND), 1)
+            ON DUPLICATE KEY UPDATE
+                last_success_at=current_timestamp(),
+                eligible_at=DATE_ADD(current_timestamp(), INTERVAL %s SECOND),
+                success_count=success_count+1
+            """,
+            (hs_id, hr_id, cooldown_seconds, cooldown_seconds),
+        )
+
+    def disable_sender_needs_attention(self, *, hs_id: int, stage: str, code: str, message: str) -> None:
+        self.db.execute(
+            """
+            UPDATE heart_senders
+            SET enabled=0,
+                health_status='error',
+                login_status=CASE WHEN %s LIKE 'LOGIN%%' OR %s LIKE 'HTTP_TEMPLATE%%' THEN 'error' ELSE login_status END,
+                last_error_stage=%s,
+                last_error_code=%s,
+                last_error_message=%s
+            WHERE hs_id=%s
+            """,
+            (stage, stage, stage, code, message[:500], hs_id),
+        )
+
+    def mark_job_paused(self, *, hj_id: int, error_scope: str, error_code: str, message: str) -> None:
+        self.db.execute(
+            """
+            UPDATE heart_jobs
+            SET status='paused',
+                last_error_scope=%s,
+                last_error_code=%s,
+                last_error_message=%s
+            WHERE hj_id=%s
+            """,
+            (error_scope if error_scope in {"sender", "receiver", "system"} else "system", error_code, message[:500], hj_id),
+        )

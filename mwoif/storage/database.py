@@ -6,8 +6,9 @@ from typing import Any, Iterable, Iterator
 
 from mwoif.core.config import DatabaseConfig
 from mwoif.domain.errors import DatabaseError
+from mwoif.storage.production_schema import PRODUCTION_TABLES
 
-HEART_TABLES: tuple[str, ...] = (
+BASE_HEART_TABLES: tuple[str, ...] = (
     "heart_receivers",
     "heart_senders",
     "heart_sender_vault",
@@ -18,6 +19,8 @@ HEART_TABLES: tuple[str, ...] = (
     "heart_worker_runs",
     "heart_settings",
 )
+
+HEART_TABLES: tuple[str, ...] = BASE_HEART_TABLES + PRODUCTION_TABLES
 
 
 @dataclass(frozen=True, slots=True)
