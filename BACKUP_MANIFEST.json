@@ -1,0 +1,32 @@
+{
+  "name": "MWOIF_HEART_V3_ROOT_BACKUP_V1_V2_READY",
+  "created_at_utc": "2026-09-10T13:44:14.779801+00:00",
+  "layout": "V3 is the normal project root; V1 and V2 are only under backup/. No nested v3 folder.",
+  "root": "mwoif_heart/",
+  "v1_backup": "mwoif_heart/backup/v1_legacy_working/",
+  "v2_backup": "mwoif_heart/backup/v2_login_session_pass/",
+  "excluded": [
+    ".git/",
+    "__pycache__/",
+    "*.pyc",
+    ".state/",
+    "state/*.json",
+    "import/auth_*.json",
+    "import/session_*.json",
+    "account.md",
+    "login_web_context.private.json",
+    "*.local.json",
+    "*.private.json",
+    "*.cookie.json",
+    "*.token.json",
+    "*.session.json"
+  ],
+  "v2_last_known_pass": {
+    "devplay_web_login": true,
+    "login_session_capture": true,
+    "initMember3_request": true,
+    "ds_v4_fastlz_decode": true,
+    "memberSeq_sessionKey_present": true,
+    "secret_output": "NONE"
+  }
+}

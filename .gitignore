@@ -1,28 +1,43 @@
+# Python
 .venv/
+venv/
 __pycache__/
 *.py[cod]
 *.log
+.pytest_cache/
+
+# Secrets / runtime state - NEVER commit
 .env
 .env.*
-
-# Runtime credentials/cache - NEVER commit
-.state/*
-!.state/.gitkeep
-
-# Raw LAB exports - NEVER commit
+*.local.json
+*.private.json
+*.cookie.json
+*.token.json
+*.session.json
+state/*
+!state/.gitkeep
+logs/*
+!logs/.gitkeep
 imports/*
 !imports/.gitkeep
-import/
 
-# Old/local secret scratch files
-account.md
-secrets.local.json
-config.local.json
+# Backup runtime state - keep code only
+backup/**/.state/*
+!backup/**/.state/.gitkeep
+backup/**/state/*
+!backup/**/state/.gitkeep
+backup/**/import/*
+backup/**/imports/*
+!backup/**/imports/.gitkeep
+backup/**/account.md
+backup/**/*.private.json
+backup/**/*.local.json
+backup/**/*.cookie.json
+backup/**/*.token.json
+backup/**/*.session.json
 
 # OS/editor
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
-
-logs/

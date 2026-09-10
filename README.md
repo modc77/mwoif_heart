@@ -1,71 +1,40 @@
-# M WOIF — ส่งใจ V1
+# MWOIF Heart V3 Workspace
 
-V1 นี้เน้น **ใช้ง่ายจาก UI ทั้งหมด** ไม่ต้องพิมพ์คำสั่งใน CMD
+โครงนี้ถูกจัดใหม่เพื่อเริ่มทำ V3 ที่ root ของ `mwoif_heart` ตามปกติ ไม่ได้เอา V3 ไปซ้อนไว้ในโฟลเดอร์ `v3/`
 
-## เปิดโปรแกรม
-
-ดับเบิลคลิก:
+## โครงสร้าง
 
 ```text
-run.bat
+mwoif_heart/
+├─ backup/
+│  ├─ v1_legacy_working/        # V1 เดิมที่ใช้ได้ เก็บไว้เทียบ/ย้อนกลับ
+│  └─ v2_login_session_pass/    # V2 ที่ DevPlay login + initMember3 PASS
+├─ mwoif/                       # พื้นที่ package หลักสำหรับ V3
+├─ state/                       # runtime state ของ V3 ไม่ commit
+├─ logs/                        # log ของ V3 ไม่ commit
+├─ imports/                     # import ชั่วคราว ไม่ commit
+├─ docs/
+├─ main.py
+├─ run.bat
+├─ requirements.txt
+└─ .gitignore
 ```
 
-ครั้งแรกโปรแกรมจะเตรียม `.venv` และติดตั้ง requirements ให้เอง
+## กติกา
 
-## รูปแบบการทำงาน
+- ทำ V3 ที่ root นี้เท่านั้น
+- `backup/v1_legacy_working/` และ `backup/v2_login_session_pass/` เป็นฐานอ้างอิง ห้ามแก้ตรง ๆ
+- ไม่มีไฟล์ private JSON, local credential, token, cookie, sessionKey, `.git`, `__pycache__` ในชุดนี้
 
-- `A` = ตัวรับหลัก 1 ไอดี
-- `1, 2, 3 ... 100++` = ไอดีส่ง
-- ไอดีส่งทุกตัวส่งให้ตัวรับหลักเท่านั้น
+## สถานะอ้างอิงล่าสุด
 
-แต่ละไอดีทำ:
+V2 ผ่านแล้วตาม flow:
 
 ```text
-เพิ่มเพื่อน → ตัวรับรับเพื่อน → ส่งใจ → อ่านกล่องใจ → รับใจ → ลบเพื่อน
+DevPlay Web Login = PASS
+LoginSession Capture = PASS
+initMember3 Request = PASS
+DS v4/FastLZ Decode = PASS
+memberSeq/sessionKey = PASS
+login-test = PASS
 ```
-
-## เพิ่มไอดีแบบเร็ว
-
-กด **+ เพิ่มไอดีส่ง** แล้วทำเพียง:
-
-1. LAB → `COPY SESSION JSON`
-2. กลับ UI → `วางจากคลิปบอร์ด`
-3. LAB → `COPY AUTH CONTEXT JSON`
-4. กลับ UI → `วางจากคลิปบอร์ด`
-5. กด `บันทึก + ไอดีถัดไป`
-
-ระบบจะเลือกเลขไอดีถัดไปให้อัตโนมัติ เช่น `1 → 2 → 3 → ...`
-ไม่ต้องสร้าง `session.json` / `auth.json` เองอีก
-
-## หน้าจอ
-
-- **ส่งใจ** — เลือกตัวรับ/ไอดีส่ง และเริ่มงาน
-- **จัดการไอดี** — เพิ่ม/ลบ/เช็ก Session และ Auth
-- **บันทึก** — ดู log และทดสอบรายชื่อเพื่อน/กล่องใจ
-- **อัปเดตเกม** — เปิดคู่มือและดูค่าที่ต้องหาใหม่เมื่อเกมอัปเดต
-
-## Git
-
-`.state/` และ `imports/` ถูก ignore แล้ว ห้าม commit Session/Auth จริง
-
-## ขั้นถัดไป
-
-หลัง freeze V1 นี้แล้ว งานต่อคือ LAB → Login ด้วย Email + Password
-
-
-## V1.2 — ตรวจ Session / Auth
-
-หน้า `จัดการไอดี` เพิ่ม:
-
-- **ทดสอบทั้งหมด** — ตรวจทุกไอดีแบบ READ ONLY
-- **ทดสอบที่เลือก**
-- **แก้ไข Session / Auth** — วางเฉพาะค่าที่หมดได้ ช่องว่างเก็บค่าเดิม
-- แสดง **Auth เหลือ** จาก JWT `exp`
-- แสดงผลออนไลน์ว่า Auth / Session ยังใช้ได้หรือไม่
-
-รายละเอียด: `docs/AUTH_SESSION_LIFETIME.md`
-
-
-## V1.3 — ลดข้อมูลที่ Copy จาก LAB
-
-ดู `docs/MINIMAL_LAB_CONTEXT.md` — Session เหลือ 3 ค่า, Auth เหลือ 4 ค่า และ Python เติม metadata คงที่เองทั้งหมด

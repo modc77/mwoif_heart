@@ -1,0 +1,28 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.log
+.env
+.env.*
+
+# Runtime credentials/cache - NEVER commit
+.state/*
+!.state/.gitkeep
+
+# Raw LAB exports - NEVER commit
+imports/*
+!imports/.gitkeep
+import/
+
+# Old/local secret scratch files
+account.md
+secrets.local.json
+config.local.json
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+logs/
