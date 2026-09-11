@@ -1,0 +1,29 @@
+{
+  "release": "M_WOIF_HEART_LOCAL_V1",
+  "version": "3.0.0-phase5.6-local-v1-final",
+  "phase": "5.6",
+  "role": "local_lab_reference",
+  "schema_changed": false,
+  "database_migration_required": false,
+  "baseline": {
+    "performance_engine": "P5.4.7 + P5.4.6 retry/open-pool lineage",
+    "update_guard": "P5.5.1 config-adapter-hotfix",
+    "direct_http_exact_template": true,
+    "browser_during_replay": false,
+    "local_auto_disable_sender": false,
+    "pair_cooldown_after_real_success": true,
+    "update_guard_expected": "4/4"
+  },
+  "operator_validated": {
+    "update_guard": "4/4 PASS",
+    "heart_job": "157/157 PASS, error=0",
+    "batch_100_reference": "99/100 in 32.2s before one-sender retry"
+  },
+  "private_files_excluded": [
+    ".env",
+    "state/*.private.json",
+    "*.token.json",
+    "*.session.json",
+    "raw credentials"
+  ]
+}

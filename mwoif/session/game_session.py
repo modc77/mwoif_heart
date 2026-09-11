@@ -16,6 +16,7 @@ import secrets
 from zoneinfo import ZoneInfo
 
 from mwoif.session.models import AuthRecord, SessionRecord
+from mwoif.net.http_pool import pooled_post_bytes
 from mwoif.session.ds_v4 import compact_json_bytes, decode_v4_data_b64, decode_v4_form_body, encode_v4
 
 
@@ -458,25 +459,25 @@ def bootstrap_session(cfg, slot: str, auth: AuthRecord, event_cb: Event | None =
         )
     started = time.monotonic()
     try:
-        r = requests.post(
-            url,
-            data=encoded.form_body,
+        status_code, response_body, _response_headers = pooled_post_bytes(
+            url=url,
+            body=encoded.form_body,
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             timeout=float(cfg.server.get("timeout_seconds") or 20),
             verify=bool(cfg.server.get("verify_ssl", True)),
         )
-    except requests.RequestException as exc:
+    except Exception as exc:
         raise SessionBootstrapError(f"initMember3 transport failed: {type(exc).__name__}") from exc
 
     try:
-        wrapper = r.json()
+        wrapper = json.loads(response_body.decode("utf-8-sig"))
     except Exception as exc:
-        raise SessionBootstrapError(f"initMember3 HTTP {r.status_code}: wrapper is not JSON") from exc
+        raise SessionBootstrapError(f"initMember3 HTTP {status_code}: wrapper is not JSON") from exc
     code = wrapper.get("responseCode") if isinstance(wrapper, dict) else None
     msg = wrapper.get("responseMessage") if isinstance(wrapper, dict) else None
-    if not r.ok or code != 200:
+    if not (200 <= status_code < 300) or code != 200:
         raise SessionBootstrapError(
-            f"initMember3 failed HTTP={r.status_code} responseCode={code} "
+            f"initMember3 failed HTTP={status_code} responseCode={code} "
             f"message={str(msg)[:80]} profile={_public_present_profile(payload)} secretOutput=NONE"
         )
 

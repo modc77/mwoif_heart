@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -500,15 +501,37 @@ class LoginSessionManager:
             raise AuthError(msg, stage="HTTP_TEMPLATE_LOGIN")
 
         auth = self._make_auth_record(kind=kind, account_id=account_id, bundle=replayed.bundle)
-        try:
-            session = bootstrap_session(self.runtime_cfg, kind.upper()[0], auth, event_cb=event_cb)
-        except SessionBootstrapError as exc:
-            msg = f"{type(exc).__name__}: {exc}"
-            if kind == "receiver":
-                self.repo.update_receiver_runtime_error(hr_id=account_id, stage="HTTP_TEMPLATE_SESSION", code="SESSION_INIT_FAILED", message=msg)
-            else:
-                self.repo.update_sender_runtime_error(hs_id=account_id, stage="HTTP_TEMPLATE_SESSION", code="SESSION_INIT_FAILED", message=msg)
-            raise SessionError(msg, stage="HTTP_TEMPLATE_SESSION") from exc
+        session = None
+        last_bootstrap_exc: SessionBootstrapError | None = None
+        for attempt in range(1, 4):
+            try:
+                session = bootstrap_session(self.runtime_cfg, kind.upper()[0], auth, event_cb=event_cb)
+                if attempt > 1:
+                    self._emit(
+                        event_cb,
+                        f"V3 SESSION RECOVERY OK kind={kind} id={account_id} attempt={attempt}/3 secretOutput=NONE",
+                    )
+                break
+            except SessionBootstrapError as exc:
+                last_bootstrap_exc = exc
+                if attempt < 3:
+                    delay = 0.45 * attempt
+                    self._emit(
+                        event_cb,
+                        f"V3 SESSION RECOVERY RETRY kind={kind} id={account_id} attempt={attempt}/3 delay={delay:.2f}s error={type(exc).__name__} secretOutput=NONE",
+                    )
+                    time.sleep(delay)
+                    continue
+                msg = f"{type(exc).__name__}: {exc}"
+                if kind == "receiver":
+                    self.repo.update_receiver_runtime_error(hr_id=account_id, stage="HTTP_TEMPLATE_SESSION", code="SESSION_INIT_FAILED", message=msg)
+                else:
+                    self.repo.update_sender_runtime_error(hs_id=account_id, stage="HTTP_TEMPLATE_SESSION", code="SESSION_INIT_FAILED", message=msg)
+                raise SessionError(msg, stage="HTTP_TEMPLATE_SESSION") from exc
+        if session is None:
+            # Defensive guard; the loop either returns a session or raises.
+            msg = f"SessionBootstrapError: {last_bootstrap_exc or 'session bootstrap returned no session'}"
+            raise SessionError(msg, stage="HTTP_TEMPLATE_SESSION")
 
         if kind == "receiver":
             self.repo.update_receiver_runtime_ok(hr_id=account_id, member_seq=session.member_seq, current_lv=session.current_lv)

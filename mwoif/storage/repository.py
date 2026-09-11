@@ -312,13 +312,13 @@ class HeartRepository:
             (hj_id,),
         )
 
-    def mark_round_passed(self, *, hround_id: int) -> None:
+    def mark_round_passed(self, *, hround_id: int, last_confirmed_step: str = "REMOVE") -> None:
         self.db.execute(
             """
             UPDATE heart_rounds
             SET status='passed',
                 current_step='PASS',
-                last_confirmed_step='REMOVE',
+                last_confirmed_step=%s,
                 heart_amount=1,
                 completed_at=current_timestamp(),
                 recovery_required=0,
@@ -328,7 +328,7 @@ class HeartRepository:
                 error_message=NULL
             WHERE hround_id=%s
             """,
-            (hround_id,),
+            (last_confirmed_step, hround_id),
         )
 
     def mark_one_round_success(self, *, hj_id: int, hs_id: int, hr_id: int) -> None:
@@ -359,26 +359,410 @@ class HeartRepository:
             """,
             (hr_id,),
         )
-        self.db.execute(
-            """
-            UPDATE heart_jobs
-            SET completed_hearts=completed_hearts+1,
-                successful_rounds=successful_rounds+1,
-                status=CASE
-                    WHEN completed_hearts+1 >= requested_hearts THEN 'completed'
-                    ELSE 'running'
-                END,
-                completed_at=CASE
-                    WHEN completed_hearts+1 >= requested_hearts THEN current_timestamp()
-                    ELSE completed_at
-                END,
-                last_error_scope=NULL,
-                last_error_code=NULL,
-                last_error_message=NULL
-            WHERE hj_id=%s
-            """,
-            (hj_id,),
-        )
+        # IMPORTANT: do not calculate status in the same UPDATE after mutating
+        # completed_hearts. MariaDB evaluates single-table SET assignments from
+        # left to right, so the old Phase 5.4 statement could see the already
+        # incremented value and mark a job completed one round too early.
+        with self.db.connection() as conn:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT requested_hearts, completed_hearts FROM heart_jobs WHERE hj_id=%s FOR UPDATE",
+                        (hj_id,),
+                    )
+                    row = cur.fetchone() or {}
+                    requested = int(row.get("requested_hearts") or 0)
+                    current = int(row.get("completed_hearts") or 0)
+                    new_completed = min(requested, current + 1) if requested > 0 else current + 1
+                    new_status = "completed" if requested > 0 and new_completed >= requested else "running"
+                    cur.execute(
+                        """
+                        UPDATE heart_jobs
+                        SET completed_hearts=%s,
+                            successful_rounds=successful_rounds+1,
+                            status=%s,
+                            completed_at=CASE WHEN %s='completed' THEN current_timestamp() ELSE NULL END,
+                            last_error_scope=NULL,
+                            last_error_code=NULL,
+                            last_error_message=NULL
+                        WHERE hj_id=%s
+                        """,
+                        (new_completed, new_status, new_status, hj_id),
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
+    def mark_batch_success(
+        self,
+        *,
+        hj_id: int,
+        hr_id: int,
+        items: list[dict[str, Any]],
+        cooldown_seconds: int,
+        cleanup_ok: bool,
+    ) -> int:
+        """Commit a received batch in one DB transaction.
+
+        Each item must contain hs_id, hround_id, sequence_no and lease_token.
+        This avoids opening several MariaDB connections per heart and is the
+        production path used by the Phase 5.3 fast engine.
+        """
+        if not items:
+            return 0
+        confirmed_step = "REMOVE" if cleanup_ok else "RECEIVE"
+        with self.db.connection() as conn:
+            try:
+                with conn.cursor() as cur:
+                    cur.executemany(
+                        """
+                        UPDATE heart_rounds
+                        SET status='passed', current_step='PASS', last_confirmed_step=%s,
+                            heart_amount=1, completed_at=current_timestamp(), recovery_required=0,
+                            error_scope=NULL, error_stage=NULL, error_code=NULL, error_message=NULL
+                        WHERE hround_id=%s
+                        """,
+                        [(confirmed_step, int(x["hround_id"])) for x in items],
+                    )
+                    cur.executemany(
+                        """
+                        UPDATE heart_senders
+                        SET last_send_at=current_timestamp(), last_success_at=current_timestamp(),
+                            total_rounds=total_rounds+1, total_pass=total_pass+1, health_status='ready',
+                            next_available_at=NULL, last_error_stage=NULL, last_error_code=NULL, last_error_message=NULL
+                        WHERE hs_id=%s
+                        """,
+                        [(int(x["hs_id"]),) for x in items],
+                    )
+                    cur.execute(
+                        """
+                        UPDATE heart_receivers
+                        SET last_receive_at=current_timestamp(), last_error_stage=NULL,
+                            last_error_code=NULL, last_error_message=NULL
+                        WHERE hr_id=%s
+                        """,
+                        (hr_id,),
+                    )
+                    count = len(items)
+                    # Lock the job row and calculate the next progress from the
+                    # pre-update values. This avoids MariaDB left-to-right SET
+                    # evaluation marking 50/100 as completed after a 50-heart batch.
+                    cur.execute(
+                        "SELECT requested_hearts, completed_hearts FROM heart_jobs WHERE hj_id=%s FOR UPDATE",
+                        (hj_id,),
+                    )
+                    job_row = cur.fetchone() or {}
+                    requested = int(job_row.get("requested_hearts") or 0)
+                    current = int(job_row.get("completed_hearts") or 0)
+                    new_completed = min(requested, current + count) if requested > 0 else current + count
+                    new_status = "completed" if requested > 0 and new_completed >= requested else "running"
+                    cur.execute(
+                        """
+                        UPDATE heart_jobs
+                        SET completed_hearts=%s,
+                            successful_rounds=successful_rounds+%s,
+                            status=%s,
+                            completed_at=CASE WHEN %s='completed' THEN current_timestamp() ELSE NULL END,
+                            last_error_scope=NULL, last_error_code=NULL, last_error_message=NULL
+                        WHERE hj_id=%s
+                        """,
+                        (new_completed, count, new_status, new_status, hj_id),
+                    )
+                    cur.executemany(
+                        """
+                        INSERT INTO heart_sender_receiver_cooldowns
+                            (hs_id, hr_id, last_success_at, eligible_at, success_count)
+                        VALUES (%s, %s, current_timestamp(), DATE_ADD(current_timestamp(), INTERVAL %s SECOND), 1)
+                        ON DUPLICATE KEY UPDATE
+                            last_success_at=current_timestamp(),
+                            eligible_at=DATE_ADD(current_timestamp(), INTERVAL %s SECOND),
+                            success_count=success_count+1
+                        """,
+                        [(int(x["hs_id"]), hr_id, cooldown_seconds, cooldown_seconds) for x in items],
+                    )
+                    cur.executemany(
+                        """
+                        UPDATE heart_job_sender_attempts
+                        SET status='passed', hround_id=%s, sequence_no=%s, completed_at=current_timestamp(),
+                            error_scope=NULL, error_stage=NULL, error_code=NULL, error_message=NULL
+                        WHERE hj_id=%s AND hs_id=%s
+                        """,
+                        [(int(x["hround_id"]), int(x["sequence_no"]), hj_id, int(x["hs_id"])) for x in items],
+                    )
+                    cur.executemany(
+                        "DELETE FROM heart_sender_leases WHERE hs_id=%s AND lease_token=%s",
+                        [(int(x["hs_id"]), str(x["lease_token"])) for x in items],
+                    )
+                conn.commit()
+                return len(items)
+            except Exception:
+                conn.rollback()
+                raise
+
+    def mark_batch_retryable_pre_send(
+        self,
+        *,
+        hj_id: int,
+        items: list[dict[str, Any]],
+    ) -> int:
+        """Persist ADD/ACCEPT misses but keep Sender retryable in this Local job.
+
+        The round remains an audit record. The unique job-attempt row is marked
+        failed with error_stage ADD/ACCEPT; Local eligibility SQL intentionally
+        treats those two pre-send stages as retryable. No pair cooldown is added
+        and the Sender is never disabled.
+        """
+        if not items:
+            return 0
+        with self.db.connection() as conn:
+            try:
+                with conn.cursor() as cur:
+                    round_rows = [
+                        (
+                            str(x.get('error_scope') or 'system'),
+                            str(x.get('error_stage') or 'UNKNOWN'),
+                            str(x.get('error_code') or 'FAILED'),
+                            str(x.get('error_message') or 'failed')[:500],
+                            int(x.get('hround_id') or 0),
+                        )
+                        for x in items if int(x.get('hround_id') or 0) > 0
+                    ]
+                    if round_rows:
+                        cur.executemany(
+                            """
+                            UPDATE heart_rounds
+                            SET status='failed', current_step='FAILED',
+                                error_scope=%s, error_stage=%s, error_code=%s, error_message=%s,
+                                recovery_required=0
+                            WHERE hround_id=%s
+                            """,
+                            round_rows,
+                        )
+                    cur.executemany(
+                        """
+                        UPDATE heart_job_sender_attempts
+                        SET status='failed', hround_id=%s, sequence_no=%s, completed_at=current_timestamp(),
+                            error_scope=%s, error_stage=%s, error_code=%s, error_message=%s
+                        WHERE hj_id=%s AND hs_id=%s
+                        """,
+                        [
+                            (
+                                int(x.get('hround_id') or 0) or None,
+                                int(x.get('sequence_no') or 0) or None,
+                                str(x.get('error_scope') or 'system') if str(x.get('error_scope') or 'system') in {'sender','receiver','system'} else 'system',
+                                str(x.get('error_stage') or 'UNKNOWN'),
+                                str(x.get('error_code') or 'FAILED'),
+                                str(x.get('error_message') or 'failed')[:500],
+                                hj_id,
+                                int(x['hs_id']),
+                            )
+                            for x in items
+                        ],
+                    )
+                    cur.executemany(
+                        """
+                        UPDATE heart_senders
+                        SET enabled=1, health_status='unknown', next_available_at=NULL,
+                            last_error_stage=%s, last_error_code=%s, last_error_message=%s
+                        WHERE hs_id=%s
+                        """,
+                        [
+                            (
+                                str(x.get('error_stage') or 'UNKNOWN'),
+                                str(x.get('error_code') or 'FAILED'),
+                                str(x.get('error_message') or 'failed')[:500],
+                                int(x['hs_id']),
+                            )
+                            for x in items
+                        ],
+                    )
+                    lease_rows = [
+                        (int(x['hs_id']), str(x.get('lease_token') or ''))
+                        for x in items if x.get('lease_token')
+                    ]
+                    if lease_rows:
+                        cur.executemany(
+                            "DELETE FROM heart_sender_leases WHERE hs_id=%s AND lease_token=%s",
+                            lease_rows,
+                        )
+                conn.commit()
+                return len(items)
+            except Exception:
+                conn.rollback()
+                raise
+
+    def mark_batch_failed(
+        self,
+        *,
+        hj_id: int,
+        items: list[dict[str, Any]],
+    ) -> int:
+        """Persist many failed sender attempts in one transaction.
+
+        Phase 5.4.2 could spend tens of seconds opening several MariaDB
+        connections for every transient ACCEPT failure.  Turbo batches may
+        contain dozens of such failures, so persist them with executemany and
+        release all leases in the same transaction.
+        """
+        if not items:
+            return 0
+        with self.db.connection() as conn:
+            try:
+                with conn.cursor() as cur:
+                    round_rows = [
+                        (
+                            'recovery_pending' if bool(x.get('recovery_required')) else 'failed',
+                            str(x.get('error_scope') or 'system'),
+                            str(x.get('error_stage') or 'UNKNOWN'),
+                            str(x.get('error_code') or 'FAILED'),
+                            str(x.get('error_message') or 'failed')[:500],
+                            1 if bool(x.get('recovery_required')) else 0,
+                            int(x.get('hround_id') or 0),
+                        )
+                        for x in items if int(x.get('hround_id') or 0) > 0
+                    ]
+                    if round_rows:
+                        cur.executemany(
+                            """
+                            UPDATE heart_rounds
+                            SET status=%s, current_step='FAILED', error_scope=%s, error_stage=%s,
+                                error_code=%s, error_message=%s, recovery_required=%s
+                            WHERE hround_id=%s
+                            """,
+                            round_rows,
+                        )
+
+                    cur.executemany(
+                        """
+                        UPDATE heart_job_sender_attempts
+                        SET status='failed', hround_id=%s, sequence_no=%s, completed_at=current_timestamp(),
+                            error_scope=%s, error_stage=%s, error_code=%s, error_message=%s
+                        WHERE hj_id=%s AND hs_id=%s
+                        """,
+                        [
+                            (
+                                int(x.get('hround_id') or 0) or None,
+                                int(x.get('sequence_no') or 0) or None,
+                                str(x.get('error_scope') or 'system') if str(x.get('error_scope') or 'system') in {'sender','receiver','system'} else 'system',
+                                str(x.get('error_stage') or 'UNKNOWN'),
+                                str(x.get('error_code') or 'FAILED'),
+                                str(x.get('error_message') or 'failed')[:500],
+                                hj_id,
+                                int(x['hs_id']),
+                            )
+                            for x in items
+                        ],
+                    )
+
+                    cur.executemany(
+                        """
+                        UPDATE heart_senders
+                        SET total_rounds=total_rounds+1, total_error=total_error+1,
+                            last_error_stage=%s, last_error_code=%s, last_error_message=%s
+                        WHERE hs_id=%s
+                        """,
+                        [
+                            (
+                                str(x.get('error_stage') or 'UNKNOWN'),
+                                str(x.get('error_code') or 'FAILED'),
+                                str(x.get('error_message') or 'failed')[:500],
+                                int(x['hs_id']),
+                            )
+                            for x in items
+                        ],
+                    )
+
+                    last = items[-1]
+                    cur.execute(
+                        """
+                        UPDATE heart_jobs
+                        SET failed_rounds=failed_rounds+%s,
+                            status=CASE WHEN stop_requested=1 THEN 'stopping' ELSE status END,
+                            last_error_scope=%s, last_error_code=%s, last_error_message=%s
+                        WHERE hj_id=%s
+                        """,
+                        (
+                            len(items),
+                            str(last.get('error_scope') or 'system') if str(last.get('error_scope') or 'system') in {'sender','receiver','system'} else 'system',
+                            str(last.get('error_code') or 'FAILED'),
+                            str(last.get('error_message') or 'failed')[:500],
+                            hj_id,
+                        ),
+                    )
+
+                    lease_rows = [
+                        (int(x['hs_id']), str(x.get('lease_token') or ''))
+                        for x in items if x.get('lease_token')
+                    ]
+                    if lease_rows:
+                        cur.executemany(
+                            "DELETE FROM heart_sender_leases WHERE hs_id=%s AND lease_token=%s",
+                            lease_rows,
+                        )
+                conn.commit()
+                return len(items)
+            except Exception:
+                conn.rollback()
+                raise
+
+    def mark_batch_send_confirmed(self, *, hround_ids: list[int]) -> int:
+        """Checkpoint confirmed SEND state for many rounds in one transaction.
+
+        This preserves crash recovery without opening one MariaDB connection per
+        sender, which was a hidden Turbo latency source.
+        """
+        ids = [int(x) for x in hround_ids if int(x or 0) > 0]
+        if not ids:
+            return 0
+        with self.db.connection() as conn:
+            try:
+                with conn.cursor() as cur:
+                    cur.executemany(
+                        """
+                        UPDATE heart_rounds
+                        SET current_step='MAILBOX', last_confirmed_step='SEND',
+                            send_outcome='confirmed', cancel_locked=1
+                        WHERE hround_id=%s
+                        """,
+                        [(x,) for x in ids],
+                    )
+                conn.commit()
+                return len(ids)
+            except Exception:
+                conn.rollback()
+                raise
+
+    def mark_batch_cooldowns(
+        self,
+        *,
+        hr_id: int,
+        hs_ids: list[int],
+        cooldown_seconds: int,
+    ) -> int:
+        ids = [int(x) for x in hs_ids if int(x or 0) > 0]
+        if not ids:
+            return 0
+        with self.db.connection() as conn:
+            try:
+                with conn.cursor() as cur:
+                    cur.executemany(
+                        """
+                        INSERT INTO heart_sender_receiver_cooldowns
+                            (hs_id, hr_id, last_success_at, eligible_at, success_count)
+                        VALUES (%s, %s, current_timestamp(), DATE_ADD(current_timestamp(), INTERVAL %s SECOND), 1)
+                        ON DUPLICATE KEY UPDATE
+                            last_success_at=current_timestamp(),
+                            eligible_at=DATE_ADD(current_timestamp(), INTERVAL %s SECOND),
+                            success_count=success_count+1
+                        """,
+                        [(x, hr_id, cooldown_seconds, cooldown_seconds) for x in ids],
+                    )
+                conn.commit()
+                return len(ids)
+            except Exception:
+                conn.rollback()
+                raise
 
     def mark_one_round_failed(self, *, hj_id: int, hs_id: int, hr_id: int, error_scope: str, error_code: str, message: str) -> None:
         self.db.execute(
@@ -448,6 +832,37 @@ class HeartRepository:
             key_version=int(row.get("key_version") or 1),
         )
 
+    def list_sender_identity_vaults(self, *, limit: int = 20000) -> dict[int, VaultBlob]:
+        """Bulk-load sender identity vault blobs for Local UI display.
+
+        The encrypted payload is decrypted only inside the operator's Local
+        process. Passwords are never returned by this repository helper and the
+        UI/controller only exposes the email field in memory.
+        """
+        limit = max(1, min(int(limit), 50000))
+        rows = self.db.fetch_all(
+            """
+            SELECT hs_id, ciphertext, iv, auth_tag, key_version
+            FROM heart_sender_vault
+            ORDER BY hs_id DESC
+            LIMIT %s
+            """,
+            (limit,),
+        )
+        out: dict[int, VaultBlob] = {}
+        for row in rows:
+            try:
+                hs_id = int(row["hs_id"])
+                out[hs_id] = VaultBlob(
+                    ciphertext=bytes(row["ciphertext"]),
+                    iv=bytes(row["iv"]),
+                    auth_tag=bytes(row["auth_tag"]),
+                    key_version=int(row.get("key_version") or 1),
+                )
+            except Exception:
+                continue
+        return out
+
     def get_receiver_job_vault(self, hj_id: int, hr_id: int) -> VaultBlob | None:
         row = self.db.fetch_one(
             """
@@ -502,14 +917,46 @@ class HeartRepository:
         )
 
     def update_sender_runtime_error(self, *, hs_id: int, stage: str, code: str, message: str) -> None:
+        """Record a Local runtime error without auto-disabling the Sender.
+
+        Local Control Center is operator-only. A transient login/template/session
+        failure must remain diagnostic state only; the account stays selectable
+        for later warm/login retries. Future Web policy can add stricter account
+        quarantine separately.
+        """
         self.db.execute(
             """
             UPDATE heart_senders
-            SET login_status='error', auth_status='error', session_status='error', health_status='error',
+            SET enabled=1,
+                login_status='error', auth_status='error', session_status='error', health_status='unknown',
+                next_available_at=NULL,
                 last_error_stage=%s, last_error_code=%s, last_error_message=%s
             WHERE hs_id=%s
             """,
             (stage, code, message[:500], hs_id),
+        )
+
+    def restore_local_auto_disabled_senders(self) -> int:
+        """Force the operator-only Local sender pool open.
+
+        Local mode never quarantines or disables a Sender. Historical
+        enabled/health/backoff state from older phases is normalized before UI,
+        warming and job selection. Diagnostic last_error_* fields are preserved
+        so the operator can still see what failed without blocking reuse. Pair
+        Sender->Receiver cooldowns remain in their dedicated cooldown table and
+        are intentionally not touched here.
+        """
+        return self.db.execute(
+            """
+            UPDATE heart_senders
+            SET enabled=1,
+                health_status='unknown',
+                next_available_at=NULL
+            WHERE enabled<>1
+               OR health_status NOT IN ('ready','unknown')
+               OR health_status IS NULL
+               OR next_available_at IS NOT NULL
+            """
         )
 
     # ---------------- Phase 5.1 production-local foundation ----------------
@@ -669,12 +1116,214 @@ class HeartRepository:
                        THEN 1 ELSE 0 END) AS eligible
             FROM heart_senders s
             LEFT JOIN heart_sender_leases l ON l.hs_id=s.hs_id
-            LEFT JOIN heart_job_sender_attempts a ON a.hj_id=%s AND a.hs_id=s.hs_id
+            LEFT JOIN heart_job_sender_attempts a
+              ON a.hj_id=%s AND a.hs_id=s.hs_id
+             AND NOT (a.status='failed' AND a.error_stage IN ('ADD','ACCEPT'))
             LEFT JOIN heart_sender_receiver_cooldowns c ON c.hs_id=s.hs_id AND c.hr_id=%s
             """,
             (hj_id, hr_id),
         ) or {}
         return {k: int(row.get(k) or 0) for k in ("total", "base_selectable", "leased", "already_attempted", "cooldown", "eligible")}
+
+    def list_sender_warm_candidates(self, *, limit: int = 500) -> list[dict[str, Any]]:
+        """Return enabled sender identities suitable for pre-login warming.
+
+        This list is receiver-agnostic on purpose. Pair cooldown and active lease
+        eligibility are enforced later when a job leases a warmed sender.
+        """
+        limit = max(1, min(int(limit), 5000))
+        return self.db.fetch_all(
+            """
+            SELECT s.hs_id, s.label, s.email_mask, s.health_status, s.last_login_at
+            FROM heart_senders s
+            JOIN heart_sender_vault v ON v.hs_id=s.hs_id
+            LEFT JOIN heart_sender_leases l
+              ON l.hs_id=s.hs_id AND l.leased_until > current_timestamp()
+            WHERE s.enabled=1
+              AND s.health_status IN ('ready','unknown')
+              AND (s.next_available_at IS NULL OR s.next_available_at <= current_timestamp())
+              AND l.hs_id IS NULL
+            ORDER BY (s.last_login_at IS NOT NULL), s.last_login_at ASC, s.hs_id ASC
+            LIMIT %s
+            """,
+            (limit,),
+        )
+
+    def list_job_attempted_sender_ids(self, *, hj_id: int, limit: int = 10000) -> list[int]:
+        limit = max(1, min(int(limit), 50000))
+        rows = self.db.fetch_all(
+            """
+            SELECT hs_id
+            FROM heart_job_sender_attempts
+            WHERE hj_id=%s
+              AND NOT (status='failed' AND error_stage IN ('ADD','ACCEPT'))
+            ORDER BY hjsa_id ASC
+            LIMIT %s
+            """,
+            (int(hj_id), limit),
+        )
+        return [int(r["hs_id"]) for r in rows if r.get("hs_id") is not None]
+
+    def _lease_sender_select(
+        self,
+        *,
+        hj_id: int,
+        hr_id: int,
+        worker_id: str,
+        lease_seconds: int,
+        count: int,
+        hs_ids: list[int] | tuple[int, ...] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Lease several eligible senders in one DB transaction.
+
+        INSERT IGNORE + the hs_id primary key keeps this safe when a future web
+        worker races another worker for the same sender. No schema change is
+        required; this only batches the Phase 5.1 lease/attempt writes.
+        """
+        count = max(1, min(int(count), 500))
+        lease_seconds = max(60, int(lease_seconds))
+        wanted = [int(x) for x in (hs_ids or []) if int(x) > 0]
+        if wanted:
+            # Preserve randomness outside SQL without making FIELD() parameter
+            # lists twice as large. The caller shuffles warm ids first.
+            wanted = list(dict.fromkeys(wanted))[: max(count * 4, count)]
+        import uuid
+        batch_worker = f"{worker_id}-{uuid.uuid4().hex[:10]}"
+        with self.db.connection() as conn:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM heart_sender_leases WHERE leased_until <= current_timestamp()")
+                    id_sql = ""
+                    params: list[Any] = [hj_id, batch_worker, lease_seconds, hj_id, hr_id]
+                    if wanted:
+                        placeholders = ",".join(["%s"] * len(wanted))
+                        id_sql = f" AND s.hs_id IN ({placeholders})"
+                        params.extend(wanted)
+                    params.append(count)
+                    cur.execute(
+                        f"""
+                        INSERT IGNORE INTO heart_sender_leases
+                            (hs_id, hj_id, worker_id, lease_token, leased_until)
+                        SELECT s.hs_id, %s, %s, UUID(),
+                               DATE_ADD(current_timestamp(), INTERVAL %s SECOND)
+                        FROM heart_senders s
+                        LEFT JOIN heart_sender_leases l
+                          ON l.hs_id=s.hs_id AND l.leased_until > current_timestamp()
+                        LEFT JOIN heart_job_sender_attempts a
+                          ON a.hj_id=%s AND a.hs_id=s.hs_id
+                         AND NOT (a.status='failed' AND a.error_stage IN ('ADD','ACCEPT'))
+                        LEFT JOIN heart_sender_receiver_cooldowns c
+                          ON c.hs_id=s.hs_id AND c.hr_id=%s
+                         AND c.eligible_at > current_timestamp()
+                        WHERE s.enabled=1
+                          AND s.health_status IN ('ready','unknown')
+                          AND (s.next_available_at IS NULL OR s.next_available_at <= current_timestamp())
+                          AND l.hs_id IS NULL
+                          AND a.hs_id IS NULL
+                          AND c.hs_id IS NULL
+                          {id_sql}
+                        ORDER BY RAND()
+                        LIMIT %s
+                        """,
+                        tuple(params),
+                    )
+                    cur.execute(
+                        """
+                        SELECT l.hs_id, l.hj_id, l.worker_id, l.lease_token, l.leased_until,
+                               s.label, s.email_mask, s.health_status, s.enabled
+                        FROM heart_sender_leases l
+                        JOIN heart_senders s ON s.hs_id=l.hs_id
+                        WHERE l.hj_id=%s AND l.worker_id=%s
+                        ORDER BY l.hs_id
+                        """,
+                        (hj_id, batch_worker),
+                    )
+                    rows = [dict(x) for x in cur.fetchall()]
+                    if rows:
+                        cur.executemany(
+                            """
+                            INSERT INTO heart_job_sender_attempts
+                                (hj_id, hs_id, hr_id, status, lease_token)
+                            VALUES (%s, %s, %s, 'leased', %s)
+                            ON DUPLICATE KEY UPDATE
+                                status='leased', lease_token=VALUES(lease_token),
+                                hround_id=NULL, sequence_no=NULL,
+                                started_at=NULL, completed_at=NULL,
+                                error_scope=NULL, error_stage=NULL, error_code=NULL, error_message=NULL
+                            """,
+                            [(hj_id, int(r["hs_id"]), hr_id, str(r["lease_token"])) for r in rows],
+                        )
+                conn.commit()
+                return rows
+            except Exception:
+                conn.rollback()
+                raise
+
+    def lease_sender_ids(
+        self, *, hj_id: int, hr_id: int, hs_ids: list[int] | tuple[int, ...],
+        worker_id: str, lease_seconds: int, count: int | None = None,
+    ) -> list[dict[str, Any]]:
+        ids = [int(x) for x in hs_ids if int(x) > 0]
+        if not ids:
+            return []
+        return self._lease_sender_select(
+            hj_id=hj_id, hr_id=hr_id, worker_id=worker_id,
+            lease_seconds=lease_seconds, count=int(count or len(ids)), hs_ids=ids,
+        )
+
+    def lease_random_senders(
+        self, *, hj_id: int, hr_id: int, count: int, worker_id: str, lease_seconds: int,
+    ) -> list[dict[str, Any]]:
+        return self._lease_sender_select(
+            hj_id=hj_id, hr_id=hr_id, worker_id=worker_id,
+            lease_seconds=lease_seconds, count=count, hs_ids=None,
+        )
+
+    def create_rounds_batch(
+        self, *, hj_id: int, hr_id: int, items: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Create round/checkpoint rows for a batch on one MariaDB connection."""
+        if not items:
+            return []
+        out: list[dict[str, Any]] = []
+        with self.db.connection() as conn:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT COALESCE(MAX(sequence_no),0)+1 AS n FROM heart_rounds WHERE hj_id=%s", (hj_id,))
+                    row = cur.fetchone() or {"n": 1}
+                    seq = int(row.get("n") or 1)
+                    for offset, item in enumerate(items):
+                        hs_id = int(item["hs_id"])
+                        lease_token = str(item["lease_token"])
+                        sequence_no = seq + offset
+                        cur.execute(
+                            """
+                            INSERT INTO heart_rounds
+                                (hj_id, hs_id, hr_id, sequence_no, status, current_step, last_confirmed_step, send_outcome, started_at)
+                            VALUES (%s,%s,%s,%s,'running','ADD','NONE','not_started',current_timestamp())
+                            """,
+                            (hj_id, hs_id, hr_id, sequence_no),
+                        )
+                        hround_id = int(cur.lastrowid or 0)
+                        cur.execute(
+                            """
+                            UPDATE heart_job_sender_attempts
+                            SET status='running', hround_id=%s, sequence_no=%s,
+                                started_at=COALESCE(started_at,current_timestamp())
+                            WHERE hj_id=%s AND hs_id=%s
+                            """,
+                            (hround_id, sequence_no, hj_id, hs_id),
+                        )
+                        cur.execute(
+                            "UPDATE heart_sender_leases SET hround_id=%s WHERE hs_id=%s AND lease_token=%s",
+                            (hround_id, hs_id, lease_token),
+                        )
+                        out.append({"hs_id": hs_id, "hround_id": hround_id, "sequence_no": sequence_no})
+                conn.commit()
+                return out
+            except Exception:
+                conn.rollback()
+                raise
 
     def cleanup_expired_leases(self) -> int:
         return self.db.execute("DELETE FROM heart_sender_leases WHERE leased_until <= current_timestamp()")
@@ -690,7 +1339,9 @@ class HeartRepository:
             SELECT s.hs_id, %s, %s, %s, DATE_ADD(current_timestamp(), INTERVAL %s SECOND)
             FROM heart_senders s
             LEFT JOIN heart_sender_leases l ON l.hs_id=s.hs_id AND l.leased_until > current_timestamp()
-            LEFT JOIN heart_job_sender_attempts a ON a.hj_id=%s AND a.hs_id=s.hs_id
+            LEFT JOIN heart_job_sender_attempts a
+              ON a.hj_id=%s AND a.hs_id=s.hs_id
+             AND NOT (a.status='failed' AND a.error_stage IN ('ADD','ACCEPT'))
             LEFT JOIN heart_sender_receiver_cooldowns c ON c.hs_id=s.hs_id AND c.hr_id=%s AND c.eligible_at > current_timestamp()
             WHERE s.enabled=1
               AND s.health_status IN ('ready','unknown')
@@ -721,7 +1372,11 @@ class HeartRepository:
             """
             INSERT INTO heart_job_sender_attempts (hj_id, hs_id, hr_id, status, lease_token)
             VALUES (%s, %s, %s, 'leased', %s)
-            ON DUPLICATE KEY UPDATE status='leased', lease_token=VALUES(lease_token)
+            ON DUPLICATE KEY UPDATE
+                status='leased', lease_token=VALUES(lease_token),
+                hround_id=NULL, sequence_no=NULL,
+                started_at=NULL, completed_at=NULL,
+                error_scope=NULL, error_stage=NULL, error_code=NULL, error_message=NULL
             """,
             (hj_id, int(row["hs_id"]), hr_id, token),
         )
@@ -799,11 +1454,17 @@ class HeartRepository:
         )
 
     def disable_sender_needs_attention(self, *, hs_id: int, stage: str, code: str, message: str) -> None:
+        """Local compatibility shim: record diagnostics, never disable Sender.
+
+        Kept under the historical method name so older Local call sites remain
+        compatible. Future Web policy may implement quarantine separately.
+        """
         self.db.execute(
             """
             UPDATE heart_senders
-            SET enabled=0,
-                health_status='error',
+            SET enabled=1,
+                health_status='unknown',
+                next_available_at=NULL,
                 login_status=CASE WHEN %s LIKE 'LOGIN%%' OR %s LIKE 'HTTP_TEMPLATE%%' THEN 'error' ELSE login_status END,
                 last_error_stage=%s,
                 last_error_code=%s,
@@ -824,4 +1485,65 @@ class HeartRepository:
             WHERE hj_id=%s
             """,
             (error_scope if error_scope in {"sender", "receiver", "system"} else "system", error_code, message[:500], hj_id),
+        )
+
+    def request_job_stop(self, *, hj_id: int) -> None:
+        self.db.execute(
+            """
+            UPDATE heart_jobs
+            SET stop_requested=1,
+                stop_requested_at=current_timestamp(),
+                status=CASE WHEN status='running' THEN 'stopping' ELSE status END
+            WHERE hj_id=%s
+            """,
+            (hj_id,),
+        )
+
+    def resume_job(self, *, hj_id: int) -> None:
+        self.db.execute(
+            """
+            UPDATE heart_jobs
+            SET stop_requested=0,
+                stop_requested_at=NULL,
+                status=CASE
+                    WHEN completed_hearts >= requested_hearts THEN 'completed'
+                    WHEN completed_hearts < requested_hearts AND status IN ('paused','stopping','queued','completed') THEN 'queued'
+                    ELSE status
+                END,
+                completed_at=CASE
+                    WHEN completed_hearts >= requested_hearts THEN completed_at
+                    ELSE NULL
+                END
+            WHERE hj_id=%s
+            """,
+            (hj_id,),
+        )
+
+    def mark_job_stopped_after_batch(self, *, hj_id: int) -> None:
+        self.db.execute(
+            """
+            UPDATE heart_jobs
+            SET status=CASE WHEN completed_hearts >= requested_hearts THEN 'completed' ELSE 'paused' END,
+                last_error_scope=NULL,
+                last_error_code='USER_STOPPED',
+                last_error_message='Stopped after active batch completed'
+            WHERE hj_id=%s
+            """,
+            (hj_id,),
+        )
+
+    def mark_job_cancelled(self, *, hj_id: int, message: str = "cancelled before run") -> None:
+        self.db.execute(
+            """
+            UPDATE heart_jobs
+            SET status='cancelled',
+                stop_requested=1,
+                stop_requested_at=current_timestamp(),
+                completed_at=current_timestamp(),
+                last_error_scope=NULL,
+                last_error_code=NULL,
+                last_error_message=%s
+            WHERE hj_id=%s
+            """,
+            (message[:500], hj_id),
         )

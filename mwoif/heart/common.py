@@ -9,6 +9,7 @@ from urllib.parse import urljoin
 from zoneinfo import ZoneInfo
 
 from mwoif.session.models import AuthRecord, SessionRecord
+from mwoif.net.http_pool import pooled_post_bytes
 
 _CABLE_ALPHABET = string.ascii_letters + string.digits
 
@@ -166,31 +167,34 @@ def redacted_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def post_ds_v4(*, cfg, url: str, body: bytes, timeout: float) -> tuple[bool, dict[str, Any]]:
-    try:
-        import requests
-    except Exception as exc:
-        return False, {"error": "REQUESTS_MISSING", "message": str(exc)}
+    import json
     started = time.monotonic()
     try:
-        response = requests.post(url, data=body, headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=timeout, verify=bool(cfg.server.get("verify_ssl", True)))
+        status_code, response_body, _response_headers = pooled_post_bytes(
+            url=url,
+            body=body,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=timeout,
+            verify=bool(cfg.server.get("verify_ssl", True)),
+        )
         elapsed_ms = round((time.monotonic() - started) * 1000, 1)
         wrapper: dict[str, Any] | None = None
         try:
-            parsed = response.json()
+            parsed = json.loads(response_body.decode("utf-8-sig"))
             if isinstance(parsed, dict):
                 wrapper = parsed
         except Exception:
             wrapper = None
         info = {
             "elapsed_ms": elapsed_ms,
-            "http_status": response.status_code,
-            "response_bytes": len(response.content or b""),
+            "http_status": status_code,
+            "response_bytes": len(response_body or b""),
             "response_code": wrapper.get("responseCode") if wrapper else None,
             "response_message": wrapper.get("responseMessage") if wrapper else None,
             "response_data_present": bool(wrapper and wrapper.get("responseData")),
             "wrapper_json_present": wrapper is not None,
         }
-        return bool(response.ok), {"wrapper": wrapper, "public": info}
-    except requests.RequestException as exc:
+        return bool(200 <= status_code < 300), {"wrapper": wrapper, "public": info}
+    except Exception as exc:
         elapsed_ms = round((time.monotonic() - started) * 1000, 1)
-        return False, {"error": "HTTP_REQUEST_FAILED", "message": str(exc), "elapsed_ms": elapsed_ms}
+        return False, {"error": "HTTP_REQUEST_FAILED", "message": f"{type(exc).__name__}: {exc}", "elapsed_ms": elapsed_ms}

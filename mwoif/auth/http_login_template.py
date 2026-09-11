@@ -12,6 +12,8 @@ from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 import requests
 
+from mwoif.net.http_pool import thread_http_session
+
 from .devplay_login import LOGIN_COOKIE_NAMES, LOGIN_QUERY_NAMES, _build_login_web_context, _candidate_from_url, _find_visible, safe_url
 from .http_login_replay import _extract_user_token
 from .models import LoginBundle, find_login_payload
@@ -683,7 +685,7 @@ def replay_exact_login_template(
     locale = str(cfg.devplay.get("locale") or query.get("lc.locale_on_game") or "en-US")
     steps: list[dict[str, Any]] = []
 
-    session = requests.Session()
+    session = thread_http_session(clear_cookies=True)
     for host in ("app.devplay.com", "account.devplay.com"):
         for name in LOGIN_COOKIE_NAMES:
             value = cookie_values.get(name)

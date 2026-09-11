@@ -50,6 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("schema-status", help="Check heart_* table status")
     sub.add_parser("settings-init", help="Insert default heart_settings values")
     sub.add_parser("health", help="Run DB + schema health check")
+    sub.add_parser("local-final-check", help="Phase 5.6: validate frozen Local/Lab release without game actions")
     sub.add_parser("vault-keygen", help="Generate a local AES-256-GCM master key for .env")
 
     p = sub.add_parser("receiver-add", help="Add or update one receiver account identity without storing password")
@@ -298,6 +299,14 @@ def main(argv: list[str] | None = None) -> int:
             log.info({"event": "SETTINGS_INIT_OK", "secretOutput": "NONE"})
             _print_json({"ok": True, "secretOutput": "NONE"})
             return 0
+
+        if command == "local-final-check":
+            from mwoif.application.local_final_guard import LocalFinalGuard
+
+            repo = build_repository(config)
+            result = LocalFinalGuard(config, repo).run()
+            _print_json(result)
+            return 0 if result.get("ok") else 2
 
         if command == "health":
             report = check_health(config)
